@@ -1,0 +1,78 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Outfit:wght@500;600;700;800&display=swap');
+
+@import "tailwindcss";
+
+/* 🎨 ReelVault Design System & Theme */
+@theme {
+  --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+  --font-display: 'Outfit', sans-serif;
+
+  --color-bg: hsl(240 10% 3.9%);
+  --color-surface: hsl(240 10% 6%);
+  --color-surface-card: hsl(240 10% 9%);
+  --color-surface-hover: hsl(240 10% 12%);
+  --color-surface-active: hsl(240 10% 15%);
+  
+  --color-text-primary: hsl(0 0% 100%);
+  --color-text-secondary: hsl(240 5% 70%);
+  --color-text-muted: hsl(240 5% 45%);
+  
+  --color-accent: hsl(263.4 70% 50.4%);
+  --color-accent-hover: hsl(262.1 83.3% 57.8%);
+  --color-accent-glow: hsla(263.4, 70%, 50.4%, 0.15);
+  
+  --color-border: hsl(240 5.9% 13%);
+  --color-border-card: hsl(240 5.9% 16%);
+  --color-border-hover: hsl(240 5.9% 22%);
+  
+  --color-progress: hsl(142.1 70.6% 45.3%);
+  --color-progress-bg: hsl(240 5% 15%);
+  
+  --shadow-premium: 0 10px 30px -10px rgba(0, 0, 0, 0.7);
+  --shadow-glow: 0 0 20px 0 rgba(124, 58, 237, 0.15);
+}
+
+body {
+  background: var(--color-bg);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+}
+
+/* ===== Elegant Scrollbars ===== */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: hsl(240 5% 20%);
+  border-radius: 999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: hsl(240 5% 30%);
+}
+
+/* ===== Custom Animation Utilities ===== */
+@keyframes pulse-glow {
+  0%, 100% {
+    opacity: 0.6;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1.05);
+  }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s infinite ease-in-out;
+}
