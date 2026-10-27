@@ -1,6 +1,6 @@
-# ReelVault
+# Restack
 
-# 🎬 Project Document: Local Media Indexer (Working Title: **ReelVault**)
+# 🎬 Project Document: Local Media Indexer: **Restack**
 
 ---
 
@@ -383,7 +383,7 @@ If expanded correctly, this can evolve into a full product.
 
 ## Project requirement analysis (from `README.md`)
 
-### What ReelVault is (and isn’t)
+### What Restack is (and isn’t)
 - **Is**: a **native Linux desktop app** that indexes local video files, auto-organizes them, tracks watch progress, and launches playback in **mpv**.
 - **Is not**: a media player (playback is delegated to mpv).
 

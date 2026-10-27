@@ -1,6 +1,6 @@
 import { NavLink, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { Home, Tv, Film, Folder, RefreshCw, ChevronRight } from "lucide-react";
+import { Home, Tv, Film, Folder, RefreshCw, ChevronRight, CheckCircle2 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "../utils/cn";
 import { invoke } from "@tauri-apps/api/core";
@@ -12,7 +12,7 @@ import {
   setLibrary,
 } from "../store/libraryStore";
 
-function Sidebar({ onSync, isSyncing }) {
+function Sidebar({ onSync, isSyncing, scanState = {} }) {
   const location = useLocation();
   const [library, setLibrary] = useState({
     series: getSeries(),
@@ -63,9 +63,12 @@ function Sidebar({ onSync, isSyncing }) {
     <aside className="w-[260px] min-w-[260px] h-screen bg-surface border-r border-border flex flex-col overflow-hidden select-none">
       {/* Brand Header */}
       <div className="p-6 pb-4">
-        <h1 className="text-xl font-display font-extrabold bg-gradient-to-r from-accent to-accent-hover bg-clip-text text-transparent tracking-tight">
-          ReelVault
-        </h1>
+        <div className="flex items-center gap-3">
+          <img src="/restack-icon-transparent.png" alt="Restack" className="w-8 h-8 object-cover" />
+          <h1 className="text-xl font-display font-extrabold bg-gradient-to-r from-accent to-accent-hover bg-clip-text text-transparent tracking-tight">
+            Restack
+          </h1>
+        </div>
       </div>
 
       {/* Navigation Links */}
@@ -235,17 +238,62 @@ function Sidebar({ onSync, isSyncing }) {
         </NavLink>
       </nav>
 
-      {/* Sync Footer Panel */}
+      {/* Sync / Progress Footer Panel */}
       <div className="p-4 border-t border-border bg-surface-card/40">
-        <button
-          type="button"
-          className="w-full flex items-center justify-center gap-2.5 px-3 py-2.5 rounded-lg bg-surface border border-border hover:bg-surface-hover hover:border-border-hover text-zinc-300 hover:text-white text-xs font-semibold transition-all duration-200 disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed active:scale-[0.98]"
-          onClick={onSync}
-          disabled={isSyncing}
-        >
-          <RefreshCw className={cn("w-3.5 h-3.5 text-zinc-400", isSyncing && "animate-spin text-accent")} />
-          <span>{isSyncing ? "Syncing Library..." : "Sync Library"}</span>
-        </button>
+
+        {/* ── Scanning state: live progress ── */}
+        {isSyncing && (
+          <div className="space-y-2.5">
+            {/* Header row */}
+            <div className="flex items-center gap-2">
+              <RefreshCw className="w-3.5 h-3.5 text-accent animate-spin shrink-0" />
+              <span className="text-xs font-semibold text-zinc-300">Scanning library…</span>
+              {scanState.total > 0 && (
+                <span className="ml-auto text-[10px] tabular-nums text-zinc-500 shrink-0">
+                  {scanState.current} / {scanState.total}
+                </span>
+              )}
+            </div>
+
+            {/* Progress bar */}
+            <div className="w-full h-1 rounded-full bg-surface overflow-hidden">
+              {scanState.total > 0 ? (
+                <div
+                  className="h-full rounded-full bg-accent transition-all duration-200 ease-out"
+                  style={{ width: `${Math.round((scanState.current / scanState.total) * 100)}%` }}
+                />
+              ) : (
+                <div className="h-full w-1/3 rounded-full bg-accent/70 animate-sidebar-shimmer" />
+              )}
+            </div>
+
+            {/* Current file */}
+            <p className="text-[10px] text-zinc-600 truncate leading-tight">
+              {scanState.currentFile || "Scanning directories…"}
+            </p>
+          </div>
+        )}
+
+        {/* ── Done state: brief success flash ── */}
+        {!isSyncing && scanState.phase === "done" && (
+          <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-progress/10 border border-progress/20">
+            <CheckCircle2 className="w-3.5 h-3.5 text-progress shrink-0" />
+            <span className="text-xs font-semibold text-zinc-300">Sync complete</span>
+          </div>
+        )}
+
+        {/* ── Idle state: normal sync button ── */}
+        {!isSyncing && scanState.phase !== "done" && (
+          <button
+            type="button"
+            className="w-full flex items-center justify-center gap-2.5 px-3 py-2.5 rounded-lg bg-surface border border-border hover:bg-surface-hover hover:border-border-hover text-zinc-300 hover:text-white text-xs font-semibold transition-all duration-200 cursor-pointer active:scale-[0.98]"
+            onClick={onSync}
+          >
+            <RefreshCw className="w-3.5 h-3.5 text-zinc-400" />
+            <span>Sync Library</span>
+          </button>
+        )}
+
       </div>
     </aside>
   );

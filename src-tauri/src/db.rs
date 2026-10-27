@@ -13,7 +13,7 @@ fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
         .map_err(|e| format!("Failed to resolve app data directory: {e}"))?;
     fs::create_dir_all(&app_dir)
         .map_err(|e| format!("Failed to create app data directory: {e}"))?;
-    Ok(app_dir.join("reelvault.db"))
+    Ok(app_dir.join("restack.db"))
 }
 
 pub fn open_db(app: &AppHandle) -> Result<Connection, String> {
