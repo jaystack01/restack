@@ -223,7 +223,7 @@ Episode/movie/other cards set `dataTransfer` `text/plain` to `JSON.stringify({ m
 
 ## 7. Known issues / sharp edges
 
-Check these before you assume a behaviour is intended:
+Check these before you assume a behaviour is intended. This list only covers sharp edges an agent must know. The full backlog of bugs and improvements lives in `TODO.md` (see §10).
 
 1. **Sync commands run on the main thread.** All commands are non-`async` `fn`. Tauri 2 runs those on the main thread, so a long `scan_user_storage` (ffprobe + ffmpeg per new file) can stall the app. Prefer `async` commands or `spawn_blocking` for heavy work.
 2. **Scanning all of `$HOME`** is slow on large homes. The narrower `Videos/Downloads/Movies` roots are commented out in `utils/scanner.rs`.
@@ -258,5 +258,27 @@ Still backlog: subtitle management, optional TMDB metadata, multi-user profiles,
 - Don't introduce new heavy dependencies, background daemons, servers, or network calls without a clear reason. The product is offline-first and minimal.
 - Verify with `npm run build` and `cd src-tauri && cargo check` before calling work done.
 - Update this file when you change architecture, commands, events, schema, or conventions.
+- Keep `TODO.md` in sync with every change, following §10.
 
-*Last updated: 2026-10-27*
+---
+
+## 10. Task tracking (`TODO.md`)
+
+`TODO.md` at the repo root is the project backlog and implementation roadmap. It is committed. Treat TODO updates as part of the change and commit them with the code they describe. A stale TODO is worse than none, because the next session will trust it.
+
+**Before you start work**
+- Read `TODO.md`. Check whether the task is already tracked, and read related items. Many items reference each other (e.g. SEC-1 and BUG-1 share a fix).
+- Move the item you're working on into **🔥 Now** and mark it `[~]`.
+
+**While you work**
+- If you find a new bug, risk, or debt, add it to the matching section with the next free ID for that prefix. Don't fix unrelated things silently, and don't leave them unrecorded.
+- Every item needs: **Location** (file:line or function), **Problem**, **Solution**, plus **Priority** (Critical/High/Medium/Low) and **Type** (Confirmed/Potential/Improvement) in the title line. Only mark it Confirmed if you verified it.
+
+**When you finish**
+- Mark finished items `[x]` and move them to **✅ Done** with the date and a one-line summary.
+- If you fixed only part of an item, leave it open and rewrite it to describe what remains.
+- Re-check items that touch the code you changed. Update line numbers, priorities, or wording that your change made wrong, and close items your change made obsolete.
+- Never renumber or reuse IDs. Commits may reference them ("fixes BUG-2").
+- If an item changes a documented invariant, sharp edge, command, or schema, update the relevant section of this file in the same change.
+
+*Last updated: 2026-10-28*
