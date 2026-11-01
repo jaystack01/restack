@@ -26,10 +26,12 @@ npm run dev              # frontend only (vite, port 1420, strictPort) — invok
 npm run build            # frontend production build → dist/
 
 cd src-tauri && cargo check    # type-check backend
+cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dirs)
 cd src-tauri && cargo clippy   # lint backend
 ```
 
-- **No test suite, no ESLint/Prettier config, no CI.** Verify changes with `npm run build` and `cargo check`.
+- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
+- **No frontend tests, no ESLint/Prettier config, no CI.** Verify changes with `npm run build`, `cargo check`, and `cargo test`.
 
 ---
 
@@ -79,8 +81,10 @@ src-tauri/src/
   commands/groups.rs         rename/merge/move groups, group list, merge suggestions
   commands/player.rs         play_episode (mpv + IPC tracker), update_watch_progress
   utils/parser.rs            Filename → Series / Movie / Other
-  utils/scanner.rs           Video ext filter, skip dirs, default roots, ffprobe duration
+  utils/scanner.rs           Video ext filter, skip dirs, default roots, ffprobe duration,
+                             walk (collect_video_files) + missing-row decision (reconcile_unseen)
   utils/thumbnail.rs         ffmpeg thumbnail generation + cache
+  utils/trash.rs             freedesktop Trash: move to trash, restore by original path
 ```
 
 ---
@@ -102,7 +106,8 @@ media (
   user_pinned INTEGER DEFAULT 0,    -- 1 = user manually moved/reclassified; scans must not override
   deleted_at INTEGER,               -- soft delete (unix secs)
   media_type TEXT DEFAULT 'series', -- 'series' | 'movie' | 'other'
-  year INTEGER                      -- movies
+  year INTEGER,                     -- movies
+  missing_since INTEGER             -- file not found by a scan but storage may be offline (unix secs); row hidden
 )
 ```
 
@@ -122,10 +127,16 @@ media (
 ### Scanning (`commands/scanner.rs`)
 
 - Default roots (`discover_default_scan_roots`): **all of `$HOME`**, `/media/<username>`, every dir in `/mnt`.
-- Skips dirs named `.cache .git node_modules target dist Trash`. Extensions: `mkv mp4 avi webm`.
+- Skips dirs named `.cache .git node_modules target dist Trash` and `.Trash-*`. Extensions: `mkv mp4 avi webm`.
 - Two passes: collect files → emit `scan:start {total_files}` → per-file `scan:progress {current,total,file_name}`.
 - ffprobe duration + ffmpeg thumbnail run **only for files not already in the DB** (expensive).
-- After the scan, rows whose `file_path` wasn't seen are **hard-deleted**.
+- `commands/scanner.rs::sync_library` does the upserts and reconciliation without an `AppHandle`; the command passes a closure that emits progress and probes new files.
+- After the scan, rows whose `file_path` wasn't seen are reconciled (`utils/scanner.rs::reconcile_unseen`, then `db::sync_missing_media`):
+  - Only rows under a root that existed and was walked **this** scan are considered, minus subtrees that had walk errors. `scan_and_sync(root)` never touches rows outside `root`.
+  - Soft-deleted rows (`deleted_at` set) are never touched, so Undo keeps working.
+  - If the file's folder still exists and has other content, the file was really removed → **hard-delete**.
+  - Otherwise (unmounted drive, offline NAS, removed folder) → set `missing_since`; the row is hidden but keeps progress/pinning. Upserts clear `missing_since` when the file reappears.
+- Every live-row query filters `deleted_at IS NULL AND missing_since IS NULL`.
 - Returns the full `LibraryResponse`.
 
 ### Parsing (`utils/parser.rs`)
@@ -157,8 +168,8 @@ When adding a pattern, insert it at the right priority and think about false pos
 
 ### Delete / restore
 
-- `delete_episodes` moves files to the freedesktop Trash (`trash` crate), then sets `deleted_at`.
-- `restore_episodes` reads `~/.local/share/Trash/info/<name>.trashinfo`, moves the file back, and clears `deleted_at`. It assumes the trashed name equals the original basename.
+- `delete_episodes_cmd` moves each file to the freedesktop Trash (`utils/trash.rs`, `trash` crate), then sets `deleted_at` for that file (`db::mark_deleted`) before the next one, so a mid-batch failure leaves the DB consistent.
+- `restore_episodes_cmd` finds the most recent Trash item whose original path matches (`trash::os_limited::list`), restores it, then clears `deleted_at` (`db::mark_restored`), per file. This works for external drives (`$topdir/.Trash-$UID`), renamed duplicates, and `$XDG_DATA_HOME`.
 
 ---
 
@@ -227,7 +238,7 @@ Check these before you assume a behaviour is intended. This list only covers sha
 
 1. **Sync commands run on the main thread.** All commands are non-`async` `fn`. Tauri 2 runs those on the main thread, so a long `scan_user_storage` (ffprobe + ffmpeg per new file) can stall the app. Prefer `async` commands or `spawn_blocking` for heavy work.
 2. **Scanning all of `$HOME`** is slow on large homes. The narrower `Videos/Downloads/Movies` roots are commented out in `utils/scanner.rs`.
-3. **Soft-delete vs rescan**: the scanner hard-deletes rows whose files are missing, so after a rescan a trashed episode's row (and progress) is gone and undo/restore can't mark it.
+3. **Missing vs soft-deleted rows**: a rescan never purges soft-deleted rows, and hides (rather than deletes) rows whose storage may be offline (`missing_since`). Neither kind is purged automatically yet (see BUG-35).
 4. `get_next_episode` (auto-play next) doesn't filter `deleted_at IS NULL` or `media_type = 'series'`.
 5. `get_all_groups` / merge-suggestion counts include soft-deleted rows, and empty groups are never garbage-collected (only merge deletes a group).
 6. Unchanged files get `duration = 0` / `thumb = None` on rescan. The upserts handle this via `CASE`/`COALESCE`, so preserve that logic if you edit upserts.
@@ -254,9 +265,9 @@ Still backlog: subtitle management, optional TMDB metadata, multi-user profiles,
 - Linux only. Don't add Windows/macOS branches.
 - Keep all SQL in `db.rs`. Command files stay thin (open DB → init schema → call db fn).
 - Schema changes must be additive and backward compatible via the `PRAGMA table_info` pattern.
-- Respect `user_pinned` and `deleted_at` in any new query or upsert.
+- Respect `user_pinned`, `deleted_at`, and `missing_since` in any new query or upsert.
 - Don't introduce new heavy dependencies, background daemons, servers, or network calls without a clear reason. The product is offline-first and minimal.
-- Verify with `npm run build` and `cd src-tauri && cargo check` before calling work done.
+- Verify with `npm run build` and `cd src-tauri && cargo check && cargo test` before calling work done. Add tests next to the code you change, and keep them off the real DB/`$HOME`/Trash.
 - Update this file when you change architecture, commands, events, schema, or conventions.
 - Keep `TODO.md` in sync with every change, following §10.
 
@@ -281,4 +292,4 @@ Still backlog: subtitle management, optional TMDB metadata, multi-user profiles,
 - Never renumber or reuse IDs. Commits may reference them ("fixes BUG-2").
 - If an item changes a documented invariant, sharp edge, command, or schema, update the relevant section of this file in the same change.
 
-*Last updated: 2026-10-28*
+*Last updated: 2026-11-01*

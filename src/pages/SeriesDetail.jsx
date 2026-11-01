@@ -61,6 +61,12 @@ export default function SeriesDetail() {
     return unsub;
   }, []);
 
+  // The route reuses this component across series, so drop selection from the previous one
+  useEffect(() => {
+    setSelectedEpisodes(new Set());
+    setLastSelectedEpisodeId(null);
+  }, [groupId]);
+
   useEffect(() => {
     return () => {
       if (episodeClickTimerRef.current) {
@@ -355,7 +361,11 @@ export default function SeriesDetail() {
   }
 
   async function deleteSelectedEpisodes() {
-    const filePaths = Array.from(selectedEpisodes);
+    // Only ever trash episodes that belong to the series on screen
+    const filePaths =
+      selectedGroupData?.episodes
+        .filter((ep) => selectedEpisodes.has(ep.filePath))
+        .map((ep) => ep.filePath) || [];
     if (!filePaths.length) return;
     setPendingDeletePaths(filePaths);
     setDeleteConfirmOpen(true);
@@ -710,6 +720,13 @@ export default function SeriesDetail() {
           Are you sure you want to delete <span className="text-white font-semibold">{pendingDeletePaths.length}</span> selected episode(s)?
           They will be relocated to your operating system's Trash container.
         </p>
+        <ul className="max-h-40 overflow-y-auto mb-6 -mt-3 space-y-1 text-xs text-zinc-300 select-none">
+          {pendingDeletePaths.map((path) => (
+            <li key={path} className="truncate" title={path}>
+              {getFileName(path)}
+            </li>
+          ))}
+        </ul>
         <div className="flex gap-2.5 justify-end">
           <Button onClick={() => setDeleteConfirmOpen(false)} variant="secondary">
             Cancel

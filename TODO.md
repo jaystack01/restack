@@ -17,20 +17,20 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧭 Suggested order (from the 2026-10-28 audit)
 
-1. **Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8 (wrong files can be trashed).
+1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
 2. **Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12.
 3. **Make it responsive**: PERF-1, PERF-6, PERF-7, PERF-8.
-4. **Safety net before refactors**: CHORE-1, TEST-1, TEST-2, CHORE-2, CHORE-3.
+4. **Safety net before refactors**: CHORE-1, ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
 
 ---
 
 ## 🏛️ Architecture and Project Structure
 
-- [ ] **ARCH-1 · Medium · Confirmed** — Scan orchestration and raw SQL live in a command file.
-  - **Location:** `src-tauri/src/commands/scanner.rs:23-123` (`scan_roots_and_sync`, SQL at :32 and :115)
-  - **Problem:** AGENT.md says command files stay thin and all SQL lives in `db.rs`. The scanner command walks the filesystem, decides what is new, runs ffprobe/ffmpeg, emits events, and runs its own `SELECT`/`DELETE`. That logic can't be tested without an `AppHandle`, and it is where BUG-1 and SEC-1/SEC-2 hide.
-  - **Solution:** Add a `services/scan.rs` (or `utils/scan.rs`) with `fn sync(conn: &mut Connection, files: &[String], probe: &dyn MediaProbe, on_progress: impl FnMut(..))`. Move `SELECT file_path` and the delete loop into `db.rs` (`get_all_file_paths`, `remove_missing_media`). Keep the command as open DB → call service → emit.
+- [ ] **ARCH-1 · Low · Confirmed** — Scan orchestration and raw SQL live in a command file.
+  - **Location:** `src-tauri/src/commands/scanner.rs` (`sync_library`, `upsert_parsed`)
+  - **Problem:** Mostly done on 2026-11-01: the SQL is in `db.rs`, the walk and missing-row decision are pure functions in `utils/scanner.rs`, and `sync_library` runs without an `AppHandle` (tested). What remains: `sync_library` still lives in a command file, and the probe is a closure rather than a named seam.
+  - **Solution:** Move `sync_library` + `upsert_parsed` to a `services/scan.rs` when a second caller appears (e.g. FEAT-2 file watching). Low urgency now.
 
 - [ ] **ARCH-2 · Medium · Confirmed** — `player.rs` mixes four concerns in one deeply nested loop.
   - **Location:** `src-tauri/src/commands/player.rs:94-194` (`track_progress`)
@@ -52,10 +52,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Command names and camelCase arg shapes are repeated (e.g. `play_episode` with `startSeconds: null` appears in six places). A rename or signature change is a grep hunt, and the "mutate, then `get_library_grouped`, then `setLibrary`" refresh pattern is copy-pasted and sometimes done wrong (BUG-8).
   - **Solution:** Add `src/api.js` exporting typed-by-JSDoc wrappers (`playMedia(path)`, `reclassify(ids, type, groupId)`, `refreshLibrary()` which also calls `setLibrary`). Route all calls through it.
 
-- [ ] **ARCH-6 · Low · Confirmed** — The DB layer performs filesystem and Trash I/O.
-  - **Location:** `src-tauri/src/db.rs:828-882` (`delete_episodes`, `restore_episodes`)
-  - **Problem:** `db.rs` is documented as "all SQL", but these functions trash and restore files, parse `.trashinfo`, and rename across directories. That mixes failure domains and makes the SQL half untestable without real files.
-  - **Solution:** Move the trash/restore logic to `utils/trash.rs`. Keep `db::mark_deleted(paths)` / `db::mark_restored(paths)` as pure SQL. Have the command orchestrate both, per file (see BUG-7).
 
 - [ ] **ARCH-7 · Low · Confirmed** — Stringly-typed media types across the boundary.
   - **Location:** `src-tauri/src/db.rs:476-523` (`reclassify_media(target_type: &str)`), `models.rs:73-82` (`ContinueWatchingItem.mode`, `up_next_type`)
@@ -70,7 +66,7 @@ _Nothing picked yet. Move items here when you start them._
 ## 🧩 Code Design and Quality
 
 - [ ] **DES-1 · Medium · Confirmed** — Multi-statement mutations aren't wrapped in transactions.
-  - **Location:** `src-tauri/src/db.rs:443-461` (`merge_groups`), `:464-473` (`move_episodes`), `:476-523` (`reclassify_media`), `:828-882`, `commands/scanner.rs:70-118`
+  - **Location:** `src-tauri/src/db.rs` (`merge_groups`, `move_episodes`, `reclassify_media`), `commands/scanner.rs` upsert loop (the missing-row reconciliation is already one transaction)
   - **Problem:** A failure halfway leaves partial state (some episodes moved, group not deleted, and so on). Loops issue one autocommit statement per row (see PERF-7 for the cost).
   - **Solution:** Take `&mut Connection`, use `let tx = conn.transaction()?; …; tx.commit()?`. Use `UPDATE … WHERE id IN (…)` for the id loops.
 
@@ -80,7 +76,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Propagate errors with `?` and `format!("Failed to …: {e}")`. Use `.optional()` (rusqlite `OptionalExtension`) for "no row" instead of catch-all `Err(_)`.
 
 - [ ] **DES-3 · Low · Confirmed** — Error-message style is inconsistent with the project convention.
-  - **Location:** `commands/scanner.rs:32-33,116` (`e.to_string()`), `commands/player.rs:74`, `utils/scanner.rs:23,30`, `utils/thumbnail.rs:10,12` (`format!("…{}", e)`)
+  - **Location:** `commands/player.rs:74`, `utils/scanner.rs:23,30`, `utils/thumbnail.rs:10,12` (`format!("…{}", e)`)
   - **Problem:** CLAUDE.md requires `format!("Failed to …: {e}")`. Bare `e.to_string()` gives the user/log no context.
   - **Solution:** Normalize these when touching the files.
 
@@ -110,42 +106,23 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🐛 Bugs and Logical Errors
 
-- [ ] **BUG-1 · High · Confirmed** — Rescan wipes soft-deleted rows.
-  - **Location:** `src-tauri/src/commands/scanner.rs:30-39,112-118`
-  - **Problem:** `scan_roots_and_sync` hard-deletes any row whose file wasn't seen, including trashed episodes. Their progress is lost, and undo/restore can't clear `deleted_at`. Related: SEC-1.
-  - **Solution:** Skip rows with `deleted_at IS NOT NULL` in the "remove deleted files" loop. Purge them only after the undo window or on Trash empty.
 
 - [ ] **BUG-2 · Medium · Confirmed** — Auto-play next can pick deleted or non-series files.
   - **Location:** `src-tauri/src/db.rs:663-681` (`get_next_episode`); the same gap exists in the Up Next query at `:760-794` (no `media_type = 'series'`)
-  - **Solution:** Add `AND deleted_at IS NULL AND media_type = 'series'` to both.
+  - **Solution:** Add `AND deleted_at IS NULL AND missing_since IS NULL AND media_type = 'series'` to both.
 
-- [ ] **BUG-3 · High · Confirmed** — Restore only works for home-partition files with unique names.
-  - **Location:** `src-tauri/src/db.rs:843-882` (`restore_episodes`)
-  - **Problem:**
-    1. It assumes the trashed name equals the original basename. With two same-named files the freedesktop spec renames to `name.2.mkv`, so restore fails or restores the wrong one.
-    2. It hardcodes `~/.local/share/Trash`. Files on `/media/<user>/…` or `/mnt/…` (both default scan roots) are trashed by the `trash` crate into `$topdir/.Trash-$UID`, so **Undo always fails for external drives**, and that trash dir then gets indexed (BUG-20).
-    3. It ignores `$XDG_DATA_HOME`.
-    4. If the 2nd of N files fails, the 1st is restored on disk but `deleted_at` is never cleared.
-  - **Solution:** Use the `trash` crate's Linux API (`trash::os_limited::list()` then filter by `original_parent.join(name) == path`, then `trash::os_limited::restore_all`). That handles topdir trash, name collisions, and XDG paths. Update `deleted_at` per file as each restore succeeds. Drop the `urlencoding` dependency afterwards.
+  - **Test:** `db::tests::next_episode_skips_unavailable_rows` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **BUG-4 · Low · Confirmed** — `get_all_groups` / merge-suggestion episode counts include soft-deleted and non-series rows.
-  - **Location:** `src-tauri/src/db.rs:526-552`, `:555-602`
-  - **Solution:** `LEFT JOIN media m ON m.group_id = sg.id AND m.deleted_at IS NULL AND m.media_type = 'series'`.
+  - **Location:** `src-tauri/src/db.rs` (`get_all_groups`, `get_merge_suggestions`)
+  - **Solution:** `LEFT JOIN media m ON m.group_id = sg.id AND m.deleted_at IS NULL AND m.missing_since IS NULL AND m.media_type = 'series'`.
 
 - [ ] **BUG-5 · Low · Confirmed** — Empty `show_groups` are never cleaned up.
   - **Location:** `src-tauri/src/db.rs` (no GC anywhere); amplified by SEC-3 and BUG-13
   - **Problem:** Evidence: the local DB has 43 groups and **0** of them have a live series episode. They still appear in `get_all_groups` pickers and merge suggestions.
   - **Solution:** Run `DELETE FROM show_groups WHERE id NOT IN (SELECT DISTINCT group_id FROM media WHERE group_id IS NOT NULL)` at the end of each scan and after move/reclassify/merge. Keep alias rows (ARCH-4) pointing to live groups only.
 
-- [ ] **BUG-7 · Medium · Confirmed** — Delete trashes files one by one and only marks the DB at the end.
-  - **Location:** `src-tauri/src/db.rs:828-841`
-  - **Problem:** A mid-batch failure leaves earlier files trashed but still visible in the library. Their rows then get hard-deleted at the next scan (BUG-1).
-  - **Solution:** Mark `deleted_at` per file right after each successful `trash::delete`. Return a partial-failure list to the UI.
 
-- [ ] **BUG-8 · High · Confirmed** — Delete trashes episodes that aren't on screen.
-  - **Location:** `src/pages/SeriesDetail.jsx:38` (selection state), `:357-362` (`deleteSelectedEpisodes` uses `Array.from(selectedEpisodes)`)
-  - **Problem:** The route `/series/:groupId` reuses the same component instance, so the `selectedEpisodes` Set survives navigating to another series. It also survives the search filter and collapsed seasons. Mark watched/unwatched/move filter by the current group, but **delete sends every selected path**. So the user can trash files from a series they're no longer looking at. The confirm dialog only shows a count.
-  - **Solution:** Clear selection when `groupId` changes (`useEffect(() => setSelectedEpisodes(new Set()), [groupId])`, or `key={groupId}` on the route element). In `deleteSelectedEpisodes`, intersect with `selectedGroupData.episodes`. List the file names in the confirm modal.
 
 - [ ] **BUG-9 · Medium · Confirmed** — Sidebar drag-to-reclassify doesn't update the global store.
   - **Location:** `src/layouts/Sidebar.jsx:12` (imports store `setLibrary`), `:17` (local `const [library, setLibrary] = useState(…)` shadows it), `:56`
@@ -156,6 +133,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/db.rs:608-635` (`update_progress` sets `last_watched_episode_id` for any media), `:701-740` (`JOIN show_groups` then deletes the pointer when there's no row)
   - **Problem:** Movies/others have `group_id = NULL`, so the JOIN finds nothing and the pointer is deleted. After a restart, SEC-3 gives them a phantom group, and the Dashboard then shows the movie as "S00E00" of a fake series.
   - **Solution:** Only set the pointer for `media_type = 'series'` (or track a separate pointer per type). Add `AND m.media_type = 'series'` to the lookup.
+  - **Test:** `db::tests::continue_watching_only_follows_series` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **BUG-11 · Medium · Confirmed** — Bulk mark watched/unwatched hijacks Continue Watching.
   - **Location:** `src/pages/SeriesDetail.jsx:303-321` (N parallel `update_watch_progress`), `src-tauri/src/db.rs:619-632`
@@ -173,6 +151,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/db.rs:181` (`find_or_create_group` runs unconditionally before upsert), `:194-198`, `:443-461`
   - **Problem:** After merging A into B, group A is deleted. The next scan recreates A for every A-named file (an empty group, re-suggested for merge). Any **newly downloaded** A episode gets `group_id = A`, splitting the show again.
   - **Solution:** ARCH-4 (aliases). Also only call `find_or_create_group` when the row is new or `group_id IS NULL`.
+  - **Test:** `db::tests::merge_then_rescan_does_not_split` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **BUG-14 · Medium · Confirmed** — A failed startup scan shows an empty library even though the DB has data.
   - **Location:** `src/App.jsx:45-49,60-63`
@@ -210,13 +189,13 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
   - **Solution:** Seek to `min(15, duration * 0.1)` (duration is known first). Regenerate when `thumbnail_path IS NULL`, the file at `thumbnail_path` no longer exists, or `duration = 0`, not only for new files.
 
-- [ ] **BUG-20 · Medium · Confirmed** — The scanner indexes external-drive trash and misses udisks2 mounts.
+- [ ] **BUG-20 · Medium · Confirmed** — The scanner walks hidden dirs and misses udisks2 mounts.
   - **Location:** `src-tauri/src/utils/scanner.rs:45-51` (`should_skip_dir`), `:53-96` (`discover_default_scan_roots`)
-  - **Problem:**
-    1. Only a dir literally named `Trash` is skipped, so `/media/<user>/<disk>/.Trash-1000/files/*.mkv` is indexed as new media.
+  - **Problem:** (`.Trash-*` dirs are skipped since 2026-11-01; what remains:)
+    1. Other hidden dirs (`~/.var`, `~/.local/share/Steam`, …) are still walked.
     2. On Arch/Fedora (including this CachyOS machine), udisks2 mounts removable drives at `/run/media/$USER`, which isn't a root, so they're never scanned.
     3. `/media/<name>` uses the basename of `$HOME` instead of the actual username.
-  - **Solution:** Skip `.Trash-*` and, generally, hidden dirs (with an allowlist if needed). Add `/run/media/$USER`. Get the username from `$USER` / `users::get_current_username`.
+  - **Solution:** Skip hidden dirs generally (with an allowlist if needed). Add `/run/media/$USER`. Get the username from `$USER` / `users::get_current_username`.
 
 - [ ] **BUG-21 · Low · Confirmed** — Skip-dir matches by name anywhere in the tree.
   - **Location:** `src-tauri/src/utils/scanner.rs:50`
@@ -289,25 +268,23 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src/components/library/EpisodeList.jsx:74,78` (`group-hover:*`), button at `:39-62` has no `group` class
   - **Solution:** Add `group` to the button's className.
 
+- [ ] **BUG-35 · Low · Confirmed** — Hidden rows (`missing_since`) and trashed rows (`deleted_at`) are never purged.
+  - **Location:** `src-tauri/src/commands/scanner.rs` (reconcile loop), `src-tauri/src/db.rs` (`sync_missing_media`)
+  - **Problem:** The 2026-11-01 data-loss fix keeps a row whenever deletion isn't certain. A deleted show folder, a drive that never returns, or a trashed episode leave hidden rows forever. They're invisible in the library but still hold `group_id` (BUG-5 GC can't drop those groups), count toward BUG-4 totals until that's fixed, and keep orphan thumbnails (PERF-14).
+  - **Solution:** Purge `deleted_at` rows when their item is no longer in the Trash (`trash::os_limited::list`) or after N days. Offer a "Missing files" view (or a setting) to forget `missing_since` rows, and/or auto-purge after N days once FEAT-1 adds settings.
+
 ## 🔐 Security and Data Integrity
 
-- [ ] **SEC-1 · High · Confirmed** — Unmounted drive plus rescan hard-deletes everything on that drive.
-  - **Location:** `src-tauri/src/commands/scanner.rs:45-49` (missing roots silently skipped), `:112-118` (delete every unseen row)
-  - **Problem:** `/media/<user>` and `/mnt/*` are default roots. If an external drive is unplugged (or a NAS is offline) at startup, the automatic startup scan deletes all its rows: progress, watched state, manual `user_pinned` organisation, and moves. Plugging it back in re-imports everything as new.
-  - **Solution:** Only purge rows whose path is under a root that **exists and was walked** this scan. Better: add an additive `missing_since INTEGER` column, hide missing rows, and purge after N days or on user action. Walk errors (`filter_map(Result::ok)` at `:54`) should mark that subtree "not fully scanned" so its rows are kept.
 
-- [ ] **SEC-2 · High · Confirmed (latent)** — `scan_and_sync(rootPath)` deletes the whole library outside `rootPath`.
-  - **Location:** `src-tauri/src/commands/scanner.rs:131-135` then `:112-118`
-  - **Problem:** `existing_files` is every row in the DB, but `seen_files` only covers `rootPath`. Calling it on `~/Videos` hard-deletes every other series/movie row. It isn't called from the UI today, but it's a registered command and FEAT-1 plans to use it.
-  - **Solution:** Restrict the delete set to `file_path LIKE root || '/%'` for the roots actually scanned (shared fix with SEC-1).
 
 - [ ] **SEC-3 · Medium · Confirmed** — Startup migration assigns phantom groups to movies and others.
   - **Location:** `src-tauri/src/lib.rs:25` (runs on every launch), `src-tauri/src/db.rs:144-168` (`WHERE group_id IS NULL`, no `media_type` filter)
   - **Problem:** Movies/others intentionally have `group_id = NULL`. Every launch gives each one a `show_groups` row named after its title. The next scan resets unpinned rows to NULL, but **pinned** rows keep it. Evidence: local DB row 27 (`media_type='other'`, `user_pinned=1`, `group_id=25`). The phantom groups pollute `get_all_groups` and merge suggestions and feed BUG-10.
   - **Solution:** Add `AND media_type = 'series'` to the backfill query. Run it once, guarded by an `app_state` key such as `migration_groups_v1`. Clean up existing phantom groups (BUG-5).
+  - **Test:** `db::tests::movies_and_others_never_get_a_group` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **SEC-4 · Medium · Potential** — Destructive commands trust arbitrary paths from the webview.
-  - **Location:** `src-tauri/src/commands/library.rs:20-24` (`delete_episodes_cmd`), `:27-31` (`restore_episodes_cmd`), `commands/player.rs:36-92` (`play_episode`)
+  - **Location:** `src-tauri/src/commands/library.rs` (`delete_episodes_cmd`, `restore_episodes_cmd`), `commands/player.rs:36-92` (`play_episode`)
   - **Problem:** Any string sent from JS is trashed or handed to `mpv` as an argument. The CSP is strict and there's no remote content, so exploitation needs an XSS first. But this is the app's only file-destroying path and it does no validation.
   - **Solution:** Have the commands accept `media_ids`, resolve paths from the DB, and refuse paths not in `media`. For mpv, pass `--` before the file argument so a path can never be parsed as an option.
 
@@ -401,10 +378,6 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 📦 Dependencies and Configuration
 
-- [ ] **DEP-1 · Medium · Confirmed** — `trash = "*"` is an unbounded wildcard.
-  - **Location:** `src-tauri/Cargo.toml:31`
-  - **Problem:** It resolves to 5.x today. A major bump changes the API silently on `cargo update`. crates.io also disallows publishing wildcards, a sign this is bad practice.
-  - **Solution:** Pin to `trash = "5"`.
 
 - [ ] **DEP-2 · Low · Confirmed** — Unused plugins are shipped.
   - **Location:** `package.json:15-16`, `src-tauri/Cargo.toml:22-23`, `lib.rs:20-21`, `capabilities/default.json`
@@ -447,34 +420,19 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **CHORE-2 · Medium · Improvement** — No lint/format tooling.
   - **Location:** repo root
-  - **Problem:** ESLint would have caught BUG-8 (`no-shadow`), BUG-32 (`no-undef`), and missing hook deps (`react-hooks/exhaustive-deps`, e.g. `SeriesDetail.jsx:457`). `cargo clippy` currently reports 4 warnings (`Iterator::last` on `DoubleEndedIterator` ×2 at `db.rs:401-402`, a needless `if let` at `commands/scanner.rs:35`, a needless borrow at `utils/scanner.rs:16`).
+  - **Problem:** ESLint would have caught BUG-8 (`no-shadow`), BUG-32 (`no-undef`), and missing hook deps (`react-hooks/exhaustive-deps`, e.g. `SeriesDetail.jsx:457`). `cargo clippy` currently reports 3 warnings (`Iterator::last` on `DoubleEndedIterator` ×2 at `db.rs:412-413`, a needless borrow at `utils/scanner.rs:17`).
   - **Solution:** Add ESLint (with `react-hooks`) and Prettier for the frontend, and run `cargo clippy` / `cargo fmt` for the backend.
 
 ## 🧪 Testing and Reliability
 
-_Current state: no tests of any kind, no CI. `npm run build`, `cargo check`, and `cargo clippy` pass (audit run 2026-10-28)._
+_Current state (2026-11-01): `cargo test` runs 24 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`) plus 4 `#[ignore]`d tests that reproduce open bugs (SEC-3, BUG-2, BUG-10, BUG-13). No frontend tests, no CI._
 
 - [ ] **CHORE-1 · High · Improvement** — Unit tests for `utils/parser.rs`.
   - **Location:** `src-tauri/src/utils/parser.rs`
   - **Problem:** These are the highest-value first tests. BUG-15 through BUG-18 were all found with a 20-line harness.
   - **Solution:** Write table-driven `#[cfg(test)]` cases covering SxxExx, NxNN, Season/Episode, E-only, anime dash, movies, Other, and the known false positives (resolutions, dates, multi-episode, year-suffixed shows, years in titles like `1917`/`2012`).
 
-- [ ] **TEST-1 · High · Improvement** — DB invariant tests on in-memory SQLite.
-  - **Location:** `src-tauri/src/db.rs`
-  - **Problem:** These functions already take `&Connection`, so `Connection::open_in_memory()` + `init_schema` works with no `AppHandle`.
-  - **Solution:** Cover:
-    1. Rescan preserves `user_pinned` group/type/season/episode.
-    2. `duration = 0` / `thumb = None` don't overwrite existing values.
-    3. Movies/others are never backfilled a group (SEC-3).
-    4. `get_next_episode` skips deleted and non-series rows (BUG-2).
-    5. The Continue Watching pointer only follows series (BUG-10).
-    6. Merge, then rescan, doesn't split (BUG-13).
-    7. Migrations run against an old-schema DB fixture (create a table without the newer columns, then run `init_schema`).
 
-- [ ] **TEST-2 · High · Improvement** — Scan-sync tests with an injected filesystem and probe.
-  - **Location:** `src-tauri/src/commands/scanner.rs` (after ARCH-1)
-  - **Problem:** These are the data-loss paths (SEC-1, SEC-2, BUG-1).
-  - **Solution:** Feed a file list plus a fake `MediaProbe`. Assert that missing roots don't delete rows, `scan_and_sync(root)` only touches `root`, and soft-deleted rows survive.
 
 - [ ] **TEST-3 · Medium · Improvement** — mpv IPC parser and tracker tests.
   - **Location:** `src-tauri/src/commands/player.rs` (after ARCH-2)
@@ -499,7 +457,7 @@ _Current state: no tests of any kind, no CI. `npm run build`, `cargo check`, and
   - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (after fixing BUG-13 and BUG-32), or delete the files and the unused commands. Update AGENT.md either way.
 
 - [ ] **MAINT-2 · Low · Confirmed** — Small dead code paths.
-  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:137-140` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:7` (`use trash;` redundant), `db.rs:402` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
+  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:137-140` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:402` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
   - **Solution:** Remove these during the next touch of each file.
 
 - [ ] **MAINT-3 · Low · Confirmed** — SeriesDetail error banner is sticky and errors are generic.
@@ -510,7 +468,7 @@ _Current state: no tests of any kind, no CI. `npm run build`, `cargo check`, and
 - [ ] **MAINT-4 · Low · Confirmed** — Docs drift between AGENT.md and this TODO.
   - **Location:** `AGENT.md` §3 file map, §7 "Known issues"
   - **Problem:** The known-issues list duplicates items here and will diverge.
-  - **Solution:** Keep AGENT.md §7 to *invariants and sharp edges an agent must know* and link here for the backlog. Update it when SEC-1, SEC-3, MAINT-1, and PERF-6 land.
+  - **Solution:** Keep AGENT.md §7 to *invariants and sharp edges an agent must know* and link here for the backlog. Update it when SEC-3, MAINT-1, and PERF-6 land (SEC-1 already updated §7 item 3).
 
 - [ ] **CHORE-4 · Low · Improvement** — Split `pages/SeriesDetail.jsx` (724 lines).
   - **Solution:** Extract `useEpisodeSelection` (selection, range, keyboard), `useUndoDelete`, `SeasonSection`, and `SeriesHeader` (inline rename). Do this after BUG-8 and BUG-22 so the fixes stay small.
@@ -536,7 +494,7 @@ _Current state: no tests of any kind, no CI. `npm run build`, `cargo check`, and
 
 ## ✨ Features / backlog
 
-- [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; **blocked on SEC-2**), excluded dirs, watched threshold.
+- [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold.
 - [ ] **FEAT-2 (Medium)** Incremental updates via filesystem watching (`notify` crate) instead of full rescans.
 - [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Silent catches today: `App.jsx:47,125`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:57`.
 - [ ] **FEAT-4 (Medium)** Startup dependency check for `mpv`, `ffmpeg`, `ffprobe` with a friendly message.
@@ -563,6 +521,15 @@ _Current state: no tests of any kind, no CI. `npm run build`, `cargo check`, and
 ---
 
 ## ✅ Done
+
+- [x] 2026-11-01 **TEST-1**: 15 DB tests on in-memory SQLite in `db.rs`: pinned group/type/season/episode survive rescans, duration/thumbnail/progress aren't clobbered, missing rows hide and revive, `missing_since` keeps its first timestamp, soft delete/restore, the Continue Watching pointer survives a missing file, normalized group lookup, and migration of a pre-group schema. SEC-3, BUG-2, BUG-10, and BUG-13 have `#[ignore]`d tests that fail today.
+- [x] 2026-11-01 **TEST-2**: extracted `collect_video_files` / `reconcile_unseen` / `is_confirmed_gone` (`utils/scanner.rs`) and `sync_library` (`commands/scanner.rs`, probe passed as a closure). 13 tests cover the decision logic, real temp-dir walks (missing roots, `.Trash-*`, unreadable dirs), and end-to-end sync (unplug/replug keeps progress, missing root, single-root scan, deleted file, trashed row kept for Undo, only new files probed). A mutation check (restoring the old "delete every unseen row") fails 8 of them.
+- [x] 2026-11-01 **BUG-36 · Low · Confirmed (latent)**: `init_schema` created `idx_media_group_season_episode` before the `ADD COLUMN group_id` migration, so a pre-`group_id` database couldn't open. Found by TEST-1's migration test. The index is now created after the migrations. Every committed schema already had the column, so no known user was affected.
+
+- [x] 2026-11-01 **SEC-1, SEC-2, BUG-1**: rescan only reconciles rows under roots walked this scan (minus walk-error subtrees), never touches soft-deleted rows, hard-deletes only when the file's folder still exists with other content, and otherwise hides the row via the new additive `missing_since` column (revived on reappearance). Continue Watching keeps its pointer while a file is missing.
+- [x] 2026-11-01 **BUG-3, BUG-7, ARCH-6**: trash I/O moved to `utils/trash.rs`. Restore uses `trash::os_limited::{list, restore_all}` (external-drive `.Trash-$UID`, renamed duplicates, `$XDG_DATA_HOME`, symlinked parents). Delete/restore update the DB per file. Verified with a scratch crate against an isolated `XDG_DATA_HOME`. Dropped the `urlencoding` and `dirs` dependencies.
+- [x] 2026-11-01 **BUG-8**: selection clears when the series changes, delete only sends selected episodes of the series on screen, and the confirm modal lists file names.
+- [x] 2026-11-01 **DEP-1**: pinned `trash = "5"`. Also BUG-20 part 1: the scanner skips `.Trash-*` dirs.
 
 - [x] 2026-10-27 Rebrand ReelVault → Restack (package, crate, identifier, DB file, UI, docs, GitHub repo).
 - [x] 2026-10-27 Added `AGENT.md` + `CLAUDE.md` project docs.

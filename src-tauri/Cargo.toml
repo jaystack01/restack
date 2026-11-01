@@ -28,6 +28,4 @@ walkdir = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4", "v5"] }
 strsim = "0.11"
-trash = "*"
-dirs = "5.0"
-urlencoding = "2.1"
+trash = "5"
