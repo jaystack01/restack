@@ -18,7 +18,7 @@ _Nothing picked yet. Move items here when you start them._
 ## 🧭 Suggested order (from the 2026-10-28 audit)
 
 1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
-2. **Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12.
+2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
 3. **Make it responsive**: PERF-1, PERF-6, PERF-7, PERF-8.
 4. **Safety net before refactors**: CHORE-1, ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
@@ -33,8 +33,8 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Move `sync_library` + `upsert_parsed` to a `services/scan.rs` when a second caller appears (e.g. FEAT-2 file watching). Low urgency now.
 
 - [ ] **ARCH-2 · Medium · Confirmed** — `player.rs` mixes four concerns in one deeply nested loop.
-  - **Location:** `src-tauri/src/commands/player.rs:94-194` (`track_progress`)
-  - **Problem:** Process lifecycle, mpv JSON-IPC protocol parsing, DB writes, and event emission are interleaved six levels deep. Throttling (PERF-6), rewatch semantics (BUG-12), and testing the `eof → next` ordering all require editing the same block.
+  - **Location:** `src-tauri/src/commands/player.rs:101-211` (`track_progress`)
+  - **Problem:** Process lifecycle, mpv JSON-IPC protocol parsing, DB writes, and event emission are interleaved six levels deep. The watched/resume rules are already pure fns (`is_watched`, `resume_position`, tested), but throttling (PERF-6) and testing the `eof → next` ordering all require editing the same block.
   - **Solution:** Extract `fn parse_ipc_line(&str) -> Option<IpcEvent>` (pure, testable), a small `ProgressTracker` struct that decides when to persist (throttle and watched latch), and keep the thread loop as glue. Preserve the "emit `play_next_episode` after the loop exits" invariant.
 
 - [ ] **ARCH-3 · Medium · Improvement** — Media identity is the file path.
@@ -71,7 +71,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Take `&mut Connection`, use `let tx = conn.transaction()?; …; tx.commit()?`. Use `UPDATE … WHERE id IN (…)` for the id loops.
 
 - [ ] **DES-2 · Low · Confirmed** — Errors are silently swallowed or dropped in the DB layer.
-  - **Location:** `src-tauri/src/db.rs:386,415` (`filter_map(|r| r.ok())` drops movie/other rows), `:496,504` (`unwrap_or((1,0))`, `unwrap_or(0)`), `:637-647` (`get_last_position` maps every error to 0), `:649-681` (`.ok()?` everywhere)
+  - **Location:** `src-tauri/src/db.rs:423,452` (`filter_map(|r| r.ok())` drops movie/other rows), `:533,541` (`unwrap_or((1,0))`, `unwrap_or(0)`), `get_episode_meta` / `get_next_episode` (`.ok()?` everywhere). (`get_last_position` was replaced by `get_playback_state`, which uses `.optional()`.)
   - **Problem:** A bad row disappears from the library without a trace. A DB lock or error during reclassify silently numbers the episode as S01E01.
   - **Solution:** Propagate errors with `?` and `format!("Failed to …: {e}")`. Use `.optional()` (rusqlite `OptionalExtension`) for "no row" instead of catch-all `Err(_)`.
 
@@ -95,8 +95,8 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Move them to `src/utils/format.js`.
 
 - [ ] **DES-7 · Low · Confirmed** — Magic numbers are spread across layers.
-  - **Location:** watched threshold `0.9` (`player.rs:141`), thumbnail seek `00:00:15` (`thumbnail.rs:31`), socket wait `15×200ms` (`player.rs:98-103`), `EPISODE_CLICK_DELAY_MS` (`SeriesDetail.jsx:22`), undo window `10000` (`SeriesDetail.jsx:372`), `MIN_SCAN_DISPLAY_MS` (`App.jsx:20`)
-  - **Problem:** FEAT-1 (settings) will need several of these. Today they're unnamed literals.
+  - **Location:** thumbnail seek `00:00:15` (`thumbnail.rs:31`), socket wait `15×200ms` (`player.rs:105-110`), `EPISODE_CLICK_DELAY_MS` (`SeriesDetail.jsx:22`), undo window `10000` (`SeriesDetail.jsx:372`), `MIN_SCAN_DISPLAY_MS` (`App.jsx:20`)
+  - **Problem:** FEAT-1 (settings) will need several of these. Today they're unnamed literals. (The watched threshold is now `WATCHED_THRESHOLD` in `player.rs`.)
   - **Solution:** Use named `const`s at module top (Rust) or a `src/config.js`, and later the settings table.
 
 - [ ] **DES-8 · Low · Confirmed** — Selection identity is mixed (file path vs id).
@@ -107,45 +107,21 @@ _Nothing picked yet. Move items here when you start them._
 ## 🐛 Bugs and Logical Errors
 
 
-- [ ] **BUG-2 · Medium · Confirmed** — Auto-play next can pick deleted or non-series files.
-  - **Location:** `src-tauri/src/db.rs:663-681` (`get_next_episode`); the same gap exists in the Up Next query at `:760-794` (no `media_type = 'series'`)
-  - **Solution:** Add `AND deleted_at IS NULL AND missing_since IS NULL AND media_type = 'series'` to both.
-
-  - **Test:** `db::tests::next_episode_skips_unavailable_rows` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **BUG-4 · Low · Confirmed** — `get_all_groups` / merge-suggestion episode counts include soft-deleted and non-series rows.
   - **Location:** `src-tauri/src/db.rs` (`get_all_groups`, `get_merge_suggestions`)
   - **Solution:** `LEFT JOIN media m ON m.group_id = sg.id AND m.deleted_at IS NULL AND m.missing_since IS NULL AND m.media_type = 'series'`.
 
 - [ ] **BUG-5 · Low · Confirmed** — Empty `show_groups` are never cleaned up.
-  - **Location:** `src-tauri/src/db.rs` (no GC anywhere); amplified by SEC-3 and BUG-13
-  - **Problem:** Evidence: the local DB has 43 groups and **0** of them have a live series episode. They still appear in `get_all_groups` pickers and merge suggestions.
+  - **Location:** `src-tauri/src/db.rs` (only merge and the one-time `migrate_existing_groups` run delete groups); amplified by BUG-13
+  - **Problem:** The one-time migration (2026-11-01) clears the backlog once, but nothing collects groups emptied later by moves, reclassify, or deleted files. Evidence before that: the local DB has 43 groups and **0** of them have a live series episode. They still appear in `get_all_groups` pickers and merge suggestions.
   - **Solution:** Run `DELETE FROM show_groups WHERE id NOT IN (SELECT DISTINCT group_id FROM media WHERE group_id IS NOT NULL)` at the end of each scan and after move/reclassify/merge. Keep alias rows (ARCH-4) pointing to live groups only.
 
 
 
-- [ ] **BUG-9 · Medium · Confirmed** — Sidebar drag-to-reclassify doesn't update the global store.
-  - **Location:** `src/layouts/Sidebar.jsx:12` (imports store `setLibrary`), `:17` (local `const [library, setLibrary] = useState(…)` shadows it), `:56`
-  - **Problem:** After a drop, `setLibrary(updated)` calls the component's state setter, not the store. The Sidebar counts update, but the Movies/Others/Series pages keep showing the item in its old place until another refresh.
-  - **Solution:** Rename the local state (e.g. `[counts, setCounts]`) or adopt DES-5's hook. Call the store's `setLibrary`.
 
-- [ ] **BUG-10 · Medium · Confirmed** — Playing a movie or "other" file erases Continue Watching.
-  - **Location:** `src-tauri/src/db.rs:608-635` (`update_progress` sets `last_watched_episode_id` for any media), `:701-740` (`JOIN show_groups` then deletes the pointer when there's no row)
-  - **Problem:** Movies/others have `group_id = NULL`, so the JOIN finds nothing and the pointer is deleted. After a restart, SEC-3 gives them a phantom group, and the Dashboard then shows the movie as "S00E00" of a fake series.
-  - **Solution:** Only set the pointer for `media_type = 'series'` (or track a separate pointer per type). Add `AND m.media_type = 'series'` to the lookup.
-  - **Test:** `db::tests::continue_watching_only_follows_series` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
-- [ ] **BUG-11 · Medium · Confirmed** — Bulk mark watched/unwatched hijacks Continue Watching.
-  - **Location:** `src/pages/SeriesDetail.jsx:303-321` (N parallel `update_watch_progress`), `src-tauri/src/db.rs:619-632`
-  - **Problem:** Every manual mark also rewrites `last_watched_episode_id`. Whichever parallel call finishes last becomes "Continue Watching", which is non-deterministic.
-  - **Solution:** Split the API: `set_watched_cmd({ mediaIds, watched })` (one transaction, no pointer update) vs. the player's progress path, which updates the pointer.
 
-- [ ] **BUG-12 · Medium · Confirmed** — Rewatching un-marks "watched" and resumes near the end.
-  - **Location:** `src-tauri/src/commands/player.rs:140-143` (`watched = pos >= duration * 0.9` written every tick), `:46-47` (resume from DB position)
-  - **Problem:**
-    1. Opening a watched episode writes `watched = false` on the first tick.
-    2. After finishing, `last_position` stays at about 90–100%, so the next play (and "Up Next" for a re-watched show) starts at the credits.
-  - **Solution:** Latch watched (`watched = previously_watched || pos >= 0.9*dur`). On `eof`, or when crossing the threshold, reset `last_position` to 0. When starting a watched item with `startSeconds == null`, start from 0.
 
 - [ ] **BUG-13 · Medium · Confirmed (latent: merge UI is unreachable, see MAINT-1)** — Merged groups resurrect and split new episodes.
   - **Location:** `src-tauri/src/db.rs:181` (`find_or_create_group` runs unconditionally before upsert), `:194-198`, `:443-461`
@@ -277,11 +253,6 @@ _Nothing picked yet. Move items here when you start them._
 
 
 
-- [ ] **SEC-3 · Medium · Confirmed** — Startup migration assigns phantom groups to movies and others.
-  - **Location:** `src-tauri/src/lib.rs:25` (runs on every launch), `src-tauri/src/db.rs:144-168` (`WHERE group_id IS NULL`, no `media_type` filter)
-  - **Problem:** Movies/others intentionally have `group_id = NULL`. Every launch gives each one a `show_groups` row named after its title. The next scan resets unpinned rows to NULL, but **pinned** rows keep it. Evidence: local DB row 27 (`media_type='other'`, `user_pinned=1`, `group_id=25`). The phantom groups pollute `get_all_groups` and merge suggestions and feed BUG-10.
-  - **Solution:** Add `AND media_type = 'series'` to the backfill query. Run it once, guarded by an `app_state` key such as `migration_groups_v1`. Clean up existing phantom groups (BUG-5).
-  - **Test:** `db::tests::movies_and_others_never_get_a_group` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **SEC-4 · Medium · Potential** — Destructive commands trust arbitrary paths from the webview.
   - **Location:** `src-tauri/src/commands/library.rs` (`delete_episodes_cmd`, `restore_episodes_cmd`), `commands/player.rs:36-92` (`play_episode`)
@@ -325,7 +296,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Parallelise with a bounded worker pool, or generate thumbnails in the background after the library is shown.
 
 - [ ] **PERF-4 · Low · Improvement** — Every command reopens the SQLite connection and re-runs `init_schema` (about 6 statements plus `PRAGMA table_info`).
-  - **Location:** all command wrappers; also `player.rs:142,160` per progress tick
+  - **Location:** all command wrappers; also `player.rs:149,167` per progress tick
   - **Solution:** Hold one `Mutex<Connection>` in `AppState`. Run schema init once at startup. Enable `PRAGMA journal_mode=WAL` (currently `delete`) so the player thread doesn't contend with scans.
 
 - [ ] **PERF-5 · Low · Improvement** — Merge suggestions are O(n²) Levenshtein over all groups.
@@ -334,7 +305,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Use a relative threshold (`distance <= max(1, len/8)`) and skip groups with 0 live episodes.
 
 - [ ] **PERF-6 · High · Confirmed** — The player writes to the DB and emits an event on every mpv `time-pos` tick.
-  - **Location:** `src-tauri/src/commands/player.rs:131-154`; frontend `src/store/libraryStore.js:28-60`
+  - **Location:** `src-tauri/src/commands/player.rs:137-163`; frontend `src/store/libraryStore.js:28-60`
   - **Problem:** mpv reports `time-pos` many times per second. Each tick opens a **new** SQLite connection, runs two writes (each an fsync'd autocommit), and emits `video_progress_updated`. The frontend then deep-clones the whole library and re-renders every subscribed page, including the Sidebar and the O(n²) drag-id computation (PERF-11). This runs for the entire playback.
   - **Solution:** Persist at most every ~5 s, or when the integer second changes by ≥ 5, plus on pause/end-file/quit. Reuse one connection in the thread. Emit at the same throttled rate. In the store, update only the matching episode's season array.
 
@@ -420,12 +391,12 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **CHORE-2 · Medium · Improvement** — No lint/format tooling.
   - **Location:** repo root
-  - **Problem:** ESLint would have caught BUG-8 (`no-shadow`), BUG-32 (`no-undef`), and missing hook deps (`react-hooks/exhaustive-deps`, e.g. `SeriesDetail.jsx:457`). `cargo clippy` currently reports 3 warnings (`Iterator::last` on `DoubleEndedIterator` ×2 at `db.rs:412-413`, a needless borrow at `utils/scanner.rs:17`).
+  - **Problem:** ESLint would have caught BUG-8 (`no-shadow`), BUG-32 (`no-undef`), and missing hook deps (`react-hooks/exhaustive-deps`, e.g. `SeriesDetail.jsx:457`). `cargo clippy` currently reports 3 warnings (`Iterator::last` on `DoubleEndedIterator` ×2 at `db.rs:438-439`, a needless borrow at `utils/scanner.rs:17`).
   - **Solution:** Add ESLint (with `react-hooks`) and Prettier for the frontend, and run `cargo clippy` / `cargo fmt` for the backend.
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-01): `cargo test` runs 24 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`) plus 4 `#[ignore]`d tests that reproduce open bugs (SEC-3, BUG-2, BUG-10, BUG-13). No frontend tests, no CI._
+_Current state (2026-11-01): `cargo test` runs 32 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
 
 - [ ] **CHORE-1 · High · Improvement** — Unit tests for `utils/parser.rs`.
   - **Location:** `src-tauri/src/utils/parser.rs`
@@ -436,7 +407,7 @@ _Current state (2026-11-01): `cargo test` runs 24 backend tests (`db.rs`, `utils
 
 - [ ] **TEST-3 · Medium · Improvement** — mpv IPC parser and tracker tests.
   - **Location:** `src-tauri/src/commands/player.rs` (after ARCH-2)
-  - **Solution:** Feed recorded mpv JSON lines (property-change, end-file `eof`/`quit`/`error`, null `data`). Assert the throttled persist calls, the watched latch (BUG-12), and that `play_next_episode` is produced only after the loop ends.
+  - **Solution:** Feed recorded mpv JSON lines (property-change, end-file `eof`/`quit`/`error`, null `data`). Assert the throttled persist calls, the `eof` position reset, and that `play_next_episode` is produced only after the loop ends.
 
 - [ ] **TEST-4 · Medium · Improvement** — Frontend unit tests (Vitest).
   - **Location:** `src/store/libraryStore.js`, selection logic in `src/pages/SeriesDetail.jsx`
@@ -468,7 +439,7 @@ _Current state (2026-11-01): `cargo test` runs 24 backend tests (`db.rs`, `utils
 - [ ] **MAINT-4 · Low · Confirmed** — Docs drift between AGENT.md and this TODO.
   - **Location:** `AGENT.md` §3 file map, §7 "Known issues"
   - **Problem:** The known-issues list duplicates items here and will diverge.
-  - **Solution:** Keep AGENT.md §7 to *invariants and sharp edges an agent must know* and link here for the backlog. Update it when SEC-3, MAINT-1, and PERF-6 land (SEC-1 already updated §7 item 3).
+  - **Solution:** Keep AGENT.md §7 to *invariants and sharp edges an agent must know* and link here for the backlog. Update it when MAINT-1 and PERF-6 land (SEC-1, SEC-3, and BUG-2 already updated §7).
 
 - [ ] **CHORE-4 · Low · Improvement** — Split `pages/SeriesDetail.jsx` (724 lines).
   - **Solution:** Extract `useEpisodeSelection` (selection, range, keyboard), `useUndoDelete`, `SeasonSection`, and `SeriesHeader` (inline rename). Do this after BUG-8 and BUG-22 so the fixes stay small.
@@ -496,7 +467,7 @@ _Current state (2026-11-01): `cargo test` runs 24 backend tests (`db.rs`, `utils
 
 - [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold.
 - [ ] **FEAT-2 (Medium)** Incremental updates via filesystem watching (`notify` crate) instead of full rescans.
-- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Silent catches today: `App.jsx:47,125`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:57`.
+- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Silent catches today: `App.jsx:47,125`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
 - [ ] **FEAT-4 (Medium)** Startup dependency check for `mpv`, `ffmpeg`, `ffprobe` with a friendly message.
 - [ ] **FEAT-5 (Low)** Search / filter across the library.
 - [ ] **FEAT-6 (Low)** Manually edit season/episode numbers for a file (sets `user_pinned`).
@@ -521,6 +492,14 @@ _Current state (2026-11-01): `cargo test` runs 24 backend tests (`db.rs`, `utils
 ---
 
 ## ✅ Done
+
+- [x] 2026-11-01 **SEC-3**: `migrate_existing_groups` only backfills series, runs once (guarded by `app_state.migration_groups_v1`), and on that run clears phantom groups from movies/others and deletes groups with no rows.
+- [x] 2026-11-01 **BUG-10**: the Continue Watching pointer is only set for, and only resolves to, series rows.
+- [x] 2026-11-01 **BUG-11**: replaced `update_watch_progress` with `set_watched_cmd({ mediaIds, watched })`: one transaction, position reset to 0, Continue Watching pointer untouched. SeriesDetail makes one call instead of N parallel ones.
+- [x] 2026-11-01 **BUG-12**: watched latches once reached (`is_watched`), `eof` resets the position to 0, and resume restarts from 0 when the saved position is in the last 10% (`resume_position`). `get_last_position` replaced by `get_playback_state`.
+- [x] 2026-11-01 **BUG-2**: auto-play next and Up Next skip trashed, missing, and non-series rows.
+- [x] 2026-11-01 **BUG-9**: Sidebar's local state renamed to `setLibrarySnapshot`, so drag-to-reclassify updates the global store.
+- Tests: the SEC-3, BUG-2, and BUG-10 regression tests are no longer `#[ignore]`d. Added tests for the one-time migration, bulk `set_watched`, `get_playback_state`, and the player's watched/resume rules.
 
 - [x] 2026-11-01 **TEST-1**: 15 DB tests on in-memory SQLite in `db.rs`: pinned group/type/season/episode survive rescans, duration/thumbnail/progress aren't clobbered, missing rows hide and revive, `missing_since` keeps its first timestamp, soft delete/restore, the Continue Watching pointer survives a missing file, normalized group lookup, and migration of a pre-group schema. SEC-3, BUG-2, BUG-10, and BUG-13 have `#[ignore]`d tests that fail today.
 - [x] 2026-11-01 **TEST-2**: extracted `collect_video_files` / `reconcile_unseen` / `is_confirmed_gone` (`utils/scanner.rs`) and `sync_library` (`commands/scanner.rs`, probe passed as a closure). 13 tests cover the decision logic, real temp-dir walks (missing roots, `.Trash-*`, unreadable dirs), and end-to-end sync (unplug/replug keeps progress, missing root, single-root scan, deleted file, trashed row kept for Undo, only new files probed). A mutation check (restoring the old "delete every unseen row") fails 8 of them.

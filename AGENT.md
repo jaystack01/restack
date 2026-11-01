@@ -79,7 +79,7 @@ src-tauri/src/
   commands/scanner.rs        scan_user_storage, scan_and_sync, get_scan_roots
   commands/library.rs        get_library_grouped, continue watching, delete/restore, reclassify
   commands/groups.rs         rename/merge/move groups, group list, merge suggestions
-  commands/player.rs         play_episode (mpv + IPC tracker), update_watch_progress
+  commands/player.rs         play_episode (mpv + IPC tracker), set_watched_cmd
   utils/parser.rs            Filename → Series / Movie / Other
   utils/scanner.rs           Video ext filter, skip dirs, default roots, ffprobe duration,
                              walk (collect_video_files) + missing-row decision (reconcile_unseen)
@@ -123,6 +123,7 @@ media (
 - `rename_group` changes only `display_name`, never `normalized_name`.
 - Merge suggestions = pairs of groups with Levenshtein distance 1–2 on normalized names (`strsim`).
 - Upserts honour `user_pinned`: once a user moves/reclassifies a file, rescans keep its group/type/season/episode.
+- Only series rows have a `group_id`; movies/others are always `NULL`. `migrate_existing_groups` (startup) backfills series rows once, guarded by `app_state.migration_groups_v1`, and on that run also cleared phantom groups that older builds gave movies/others.
 
 ### Scanning (`commands/scanner.rs`)
 
@@ -155,11 +156,12 @@ When adding a pattern, insert it at the right priority and think about false pos
 
 ### Playback (`commands/player.rs`)
 
-- `play_episode(filePath, startSeconds?)`: start = `startSeconds ?? DB last_position`. Kills any previous mpv child, spawns
+- `play_episode(filePath, startSeconds?)`: start = `startSeconds ??` the DB `last_position`, except that a position in the last 10% (credits) restarts from 0 (`resume_position`). Kills any previous mpv child, spawns
   `mpv <file> --input-ipc-server=/tmp/mpv-<uuid>.sock --keep-open=no --no-resume-playback --script-opts=autoload-disabled=yes --force-window=no [--start=N]`.
-- A thread observes `time-pos` and `duration` over IPC, writes progress on every change, and marks **watched at ≥ 90%**.
+- A thread observes `time-pos` and `duration` over IPC and writes progress on every change. **Watched latches** at ≥ 90% (`WATCHED_THRESHOLD`): an already-watched item stays watched while rewatching (`is_watched`). On `eof` the position resets to 0 (watched = true).
 - On `end-file` with reason `eof` it looks up the next episode in the group and emits `play_next_episode` **after** the IPC loop closes. That ordering avoids a Broken-pipe race, so don't move it.
-- `update_progress` also sets `app_state.last_watched_episode_id`, which drives Continue Watching.
+- `update_progress` also sets `app_state.last_watched_episode_id` for **series** rows only, which drives Continue Watching. Manual mark watched/unwatched goes through `set_watched_cmd` (one transaction, position reset to 0) and never moves that pointer.
+- Auto-play next (`get_next_episode`) and Up Next skip trashed, missing, and non-series rows.
 
 ### Thumbnails (`utils/thumbnail.rs`)
 
@@ -185,7 +187,7 @@ When adding a pattern, insert it at the right priority and think about false pos
 | `get_library_grouped` | — | `LibraryResponse` (no scan) |
 | `get_continue_watching_single_cmd` | — | `ContinueWatchingItem \| null` |
 | `play_episode` | `{ filePath, startSeconds }` | — |
-| `update_watch_progress` | `{ payload: { filePath, lastPosition, watched } }` | — |
+| `set_watched_cmd` | `{ mediaIds, watched }` | — |
 | `rename_group_cmd` | `{ groupId, newName }` | — |
 | `merge_groups_cmd` | `{ sourceGroupId, targetGroupId }` | — |
 | `move_episodes_cmd` | `{ mediaIds, targetGroupId }` | — |
@@ -239,12 +241,11 @@ Check these before you assume a behaviour is intended. This list only covers sha
 1. **Sync commands run on the main thread.** All commands are non-`async` `fn`. Tauri 2 runs those on the main thread, so a long `scan_user_storage` (ffprobe + ffmpeg per new file) can stall the app. Prefer `async` commands or `spawn_blocking` for heavy work.
 2. **Scanning all of `$HOME`** is slow on large homes. The narrower `Videos/Downloads/Movies` roots are commented out in `utils/scanner.rs`.
 3. **Missing vs soft-deleted rows**: a rescan never purges soft-deleted rows, and hides (rather than deletes) rows whose storage may be offline (`missing_since`). Neither kind is purged automatically yet (see BUG-35).
-4. `get_next_episode` (auto-play next) doesn't filter `deleted_at IS NULL` or `media_type = 'series'`.
-5. `get_all_groups` / merge-suggestion counts include soft-deleted rows, and empty groups are never garbage-collected (only merge deletes a group).
-6. Unchanged files get `duration = 0` / `thumb = None` on rescan. The upserts handle this via `CASE`/`COALESCE`, so preserve that logic if you edit upserts.
-7. Many `invoke` calls swallow errors (`catch {}`). The App-level scan is intentionally silent.
-8. `index.css` imports Google Fonts. That conflicts with offline-first, and the CSP (`default-src 'self'`) likely blocks it in the webview, so the system font fallback is what renders.
-9. mpv sockets live in `/tmp/mpv-<uuid>.sock` and are cleaned up when the tracker ends.
+4. `get_all_groups` / merge-suggestion counts include soft-deleted and missing rows, and empty groups are only garbage-collected by merge and by the one-time startup migration.
+5. Unchanged files get `duration = 0` / `thumb = None` on rescan. The upserts handle this via `CASE`/`COALESCE`, so preserve that logic if you edit upserts.
+6. Many `invoke` calls swallow errors (`catch {}`). The App-level scan is intentionally silent.
+7. `index.css` imports Google Fonts. That conflicts with offline-first, and the CSP (`default-src 'self'`) likely blocks it in the webview, so the system font fallback is what renders.
+8. mpv sockets live in `/tmp/mpv-<uuid>.sock` and are cleaned up when the tracker ends.
 
 ---
 

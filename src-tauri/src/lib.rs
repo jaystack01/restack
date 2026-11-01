@@ -6,7 +6,7 @@ pub mod utils;
 use crate::db::{init_schema, migrate_existing_groups, open_db};
 use crate::commands::scanner::{scan_user_storage, scan_and_sync, get_scan_roots};
 use crate::commands::library::{delete_episodes_cmd, get_continue_watching_single_cmd, get_library_grouped, restore_episodes_cmd, reclassify_media_cmd};
-use crate::commands::player::{update_watch_progress, play_episode};
+use crate::commands::player::{set_watched_cmd, play_episode};
 use crate::commands::groups::{
     rename_group_cmd, merge_groups_cmd, move_episodes_cmd,
     get_all_groups_cmd, get_merge_suggestions_cmd,
@@ -35,7 +35,7 @@ pub fn run() {
             get_scan_roots,
             get_library_grouped,
             get_continue_watching_single_cmd,
-            update_watch_progress,
+            set_watched_cmd,
             play_episode,
             rename_group_cmd,
             merge_groups_cmd,

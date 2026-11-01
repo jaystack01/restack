@@ -1,5 +1,5 @@
 use crate::models::{ContinueWatchingItem, Episode, GroupInfo, LibraryResponse, MergeSuggestion, MovieItem, OtherItem, ParsedEpisode, SeasonGroup, ShowGroup};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
@@ -148,31 +148,57 @@ pub fn find_or_create_group(conn: &Connection, show_name: &str) -> Result<i64, S
     }
 }
 
-/// Backfill `group_id` for all `media` rows that don't have one yet.
+/// One-time startup migration: backfill `group_id` for series rows that lack one,
+/// and undo earlier runs that gave movies/others phantom groups.
 pub fn migrate_existing_groups(conn: &Connection) -> Result<(), String> {
-    let rows: Vec<(i64, String)> = {
-        let mut stmt = conn
-            .prepare("SELECT id, show_name FROM media WHERE group_id IS NULL")
-            .map_err(|e| format!("Failed to prepare migration query: {e}"))?;
+    let done: bool = conn
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM app_state WHERE key = 'migration_groups_v1')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to read migration state: {e}"))?;
+    if done {
+        return Ok(());
+    }
 
-        let collected: Vec<(i64, String)> = stmt
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Failed to start group migration: {e}"))?;
+
+    let rows: Vec<(i64, String)> = {
+        let mut stmt = tx
+            .prepare("SELECT id, show_name FROM media WHERE group_id IS NULL AND media_type = 'series'")
+            .map_err(|e| format!("Failed to prepare migration query: {e}"))?;
+        let collected = stmt
             .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
             .map_err(|e| format!("Failed to read migration rows: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read migration rows: {e}"))?;
         collected
     };
 
     for (id, show_name) in rows {
-        let group_id = find_or_create_group(conn, &show_name)?;
-        conn.execute(
+        let group_id = find_or_create_group(&tx, &show_name)?;
+        tx.execute(
             "UPDATE media SET group_id = ?1 WHERE id = ?2",
             params![group_id, id],
         )
         .map_err(|e| format!("Failed to update group_id for media id {id}: {e}"))?;
     }
 
-    Ok(())
+    tx.execute_batch(
+        "
+        UPDATE media SET group_id = NULL WHERE media_type != 'series' AND group_id IS NOT NULL;
+        DELETE FROM show_groups
+            WHERE id NOT IN (SELECT DISTINCT group_id FROM media WHERE group_id IS NOT NULL);
+        INSERT INTO app_state (key, value_text, updated_at)
+            VALUES ('migration_groups_v1', 'done', CAST(strftime('%s','now') AS INTEGER));
+        ",
+    )
+    .map_err(|e| format!("Failed to clean up phantom groups: {e}"))?;
+
+    tx.commit().map_err(|e| format!("Failed to commit group migration: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -632,7 +658,7 @@ pub fn update_progress(conn: &Connection, file_path: &str, last_position: i64, w
         INSERT INTO app_state (key, value_text, updated_at)
         SELECT 'last_watched_episode_id', CAST(id AS TEXT), CAST(strftime('%s','now') AS INTEGER)
         FROM media
-        WHERE file_path = ?1
+        WHERE file_path = ?1 AND media_type = 'series'
         LIMIT 1
         ON CONFLICT(key) DO UPDATE SET
             value_text = excluded.value_text,
@@ -645,16 +671,31 @@ pub fn update_progress(conn: &Connection, file_path: &str, last_position: i64, w
     Ok(())
 }
 
-pub fn get_last_position(conn: &Connection, file_path: &str) -> Result<i64, String> {
-    let mut stmt = conn
-        .prepare("SELECT last_position FROM media WHERE file_path = ?1")
-        .map_err(|e| format!("Failed to prepare last_position query: {e}"))?;
+/// `(last_position, duration, watched)` for a file, or `None` if it isn't indexed.
+pub fn get_playback_state(conn: &Connection, file_path: &str) -> Result<Option<(i64, i64, bool)>, String> {
+    conn.query_row(
+        "SELECT last_position, duration, watched FROM media WHERE file_path = ?1",
+        params![file_path],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    )
+    .optional()
+    .map_err(|e| format!("Failed to read playback state: {e}"))
+}
 
-    let result: Result<i64, _> = stmt.query_row(params![file_path], |row| row.get(0));
-    match result {
-        Ok(pos) => Ok(pos),
-        Err(_) => Ok(0),
+/// Manual mark watched/unwatched. Resets the position so the next play starts
+/// from the beginning, and doesn't move the Continue Watching pointer.
+pub fn set_watched(conn: &Connection, media_ids: &[i64], watched: bool) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Failed to start watched update: {e}"))?;
+    for &media_id in media_ids {
+        tx.execute(
+            "UPDATE media SET watched = ?1, last_position = 0 WHERE id = ?2",
+            params![watched, media_id],
+        )
+        .map_err(|e| format!("Failed to update watched state for media id {media_id}: {e}"))?;
     }
+    tx.commit().map_err(|e| format!("Failed to commit watched update: {e}"))
 }
 
 pub fn get_episode_meta(conn: &Connection, file_path: &str) -> Option<(i64, u32, u32)> {
@@ -677,6 +718,7 @@ pub fn get_next_episode(conn: &Connection, group_id: i64, season: u32, episode: 
             "
             SELECT file_path FROM media
             WHERE group_id = ?1
+            AND deleted_at IS NULL AND missing_since IS NULL AND media_type = 'series'
             AND (
                 (season = ?2 AND episode > ?3)
                 OR (season > ?2)
@@ -724,7 +766,7 @@ pub fn get_continue_watching_single(conn: &Connection) -> Result<Option<Continue
             m.group_id
         FROM media m
         JOIN show_groups sg ON sg.id = m.group_id
-        WHERE m.id = ?1 AND m.deleted_at IS NULL AND m.missing_since IS NULL
+        WHERE m.id = ?1 AND m.deleted_at IS NULL AND m.missing_since IS NULL AND m.media_type = 'series'
         ",
         params![last_id],
         |row| {
@@ -791,7 +833,7 @@ pub fn get_continue_watching_single(conn: &Connection) -> Result<Option<Continue
             m.thumbnail_path
         FROM media m
         JOIN show_groups sg ON sg.id = m.group_id
-        WHERE m.group_id = ?1 AND m.deleted_at IS NULL AND m.missing_since IS NULL
+        WHERE m.group_id = ?1 AND m.deleted_at IS NULL AND m.missing_since IS NULL AND m.media_type = 'series'
           AND (
             (m.season = ?2 AND m.episode > ?3)
             OR (m.season > ?2)
@@ -1107,11 +1149,64 @@ mod tests {
         assert_eq!(library_paths(&conn), vec!["/v/old.s01e01.mkv"]);
     }
 
+    #[test]
+    fn group_migration_runs_once_and_drops_phantom_groups() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 100, None).unwrap();
+        upsert_other(&conn, "/v/o.mkv", "o", 30, None).unwrap();
+        // State left by the old migration: a pinned "other" with a phantom group
+        let phantom = find_or_create_group(&conn, "o").unwrap();
+        conn.execute("UPDATE media SET group_id = ?1, user_pinned = 1 WHERE file_path = '/v/o.mkv'", [phantom]).unwrap();
+        conn.execute("UPDATE media SET group_id = NULL WHERE file_path = '/v/a.s01e01.mkv'", []).unwrap();
+
+        migrate_existing_groups(&conn).unwrap();
+
+        assert!(row::<Option<i64>>(&conn, "/v/o.mkv", "group_id").is_none());
+        assert!(row::<Option<i64>>(&conn, "/v/a.s01e01.mkv", "group_id").is_some());
+        let groups: i64 = conn.query_row("SELECT COUNT(*) FROM show_groups", [], |r| r.get(0)).unwrap();
+        assert_eq!(groups, 1);
+
+        // Second launch: a NULL series group stays NULL because the migration is done
+        conn.execute("UPDATE media SET group_id = NULL WHERE file_path = '/v/a.s01e01.mkv'", []).unwrap();
+        migrate_existing_groups(&conn).unwrap();
+        assert!(row::<Option<i64>>(&conn, "/v/a.s01e01.mkv", "group_id").is_none());
+    }
+
+    #[test]
+    fn set_watched_is_bulk_and_keeps_continue_watching() {
+        let conn = test_db();
+        for e in 1..=3 {
+            upsert_episode(&conn, &format!("/v/a.s01e0{e}.mkv"), &ep("A", 1, e), 1200, None).unwrap();
+        }
+        update_progress(&conn, "/v/a.s01e02.mkv", 600, false).unwrap();
+        let ids = [id_of(&conn, "/v/a.s01e01.mkv"), id_of(&conn, "/v/a.s01e03.mkv")];
+
+        set_watched(&conn, &ids, true).unwrap();
+
+        assert!(row::<bool>(&conn, "/v/a.s01e01.mkv", "watched"));
+        assert!(row::<bool>(&conn, "/v/a.s01e03.mkv", "watched"));
+        assert_eq!(row::<i64>(&conn, "/v/a.s01e01.mkv", "last_position"), 0);
+        let item = get_continue_watching_single(&conn).unwrap().expect("pointer");
+        assert_eq!(item.file_path, "/v/a.s01e02.mkv");
+
+        set_watched(&conn, &ids[..1], false).unwrap();
+        assert!(!row::<bool>(&conn, "/v/a.s01e01.mkv", "watched"));
+    }
+
+    #[test]
+    fn playback_state_reads_position_duration_and_watched() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 1200, None).unwrap();
+        update_progress(&conn, "/v/a.s01e01.mkv", 1150, true).unwrap();
+
+        assert_eq!(get_playback_state(&conn, "/v/a.s01e01.mkv").unwrap(), Some((1150, 1200, true)));
+        assert_eq!(get_playback_state(&conn, "/v/unknown.mkv").unwrap(), None);
+    }
+
     // --- Open bugs: these document the expected behaviour and fail today.
     // Remove the #[ignore] when fixing the referenced TODO item.
 
     #[test]
-    #[ignore = "SEC-3: migrate_existing_groups backfills groups for movies/others"]
     fn movies_and_others_never_get_a_group() {
         let conn = test_db();
         upsert_movie(&conn, "/v/m.2010.mkv", "M", Some(2010), 5400, None).unwrap();
@@ -1124,7 +1219,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG-2: get_next_episode doesn't filter deleted/missing/non-series rows"]
     fn next_episode_skips_unavailable_rows() {
         let conn = test_db();
         for e in 1..=4 {
@@ -1138,7 +1232,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG-10: playing a movie erases the series Continue Watching pointer"]
     fn continue_watching_only_follows_series() {
         let conn = test_db();
         upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 1200, None).unwrap();

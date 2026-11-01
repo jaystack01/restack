@@ -1,4 +1,4 @@
-use serde::{Serialize, Deserialize};
+use serde::Serialize;
 use std::sync::Mutex;
 use std::process::Child;
 
@@ -40,14 +40,6 @@ pub struct ParsedEpisode {
     pub season: u32,
     pub episode: u32,
     pub title: Option<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct ProgressUpdatePayload {
-    pub file_path: String,
-    pub last_position: i64,
-    pub watched: bool,
 }
 
 #[derive(Serialize)]

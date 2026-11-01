@@ -14,7 +14,8 @@ import {
 
 function Sidebar({ onSync, isSyncing, scanState = {} }) {
   const location = useLocation();
-  const [library, setLibrary] = useState({
+  // Local snapshot for rendering counts; `setLibrary` (store) is what pages read
+  const [library, setLibrarySnapshot] = useState({
     series: getSeries(),
     movies: getMovies(),
     others: getOthers(),
@@ -23,7 +24,7 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
 
   useEffect(() => {
     const unsub = subscribe(() => {
-      setLibrary({
+      setLibrarySnapshot({
         series: getSeries(),
         movies: getMovies(),
         others: getOthers(),

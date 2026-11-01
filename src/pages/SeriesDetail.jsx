@@ -309,17 +309,10 @@ export default function SeriesDetail() {
   async function updateEpisodesWatchState(episodes, watched) {
     if (!episodes.length) return;
     try {
-      await Promise.all(
-        episodes.map((ep) =>
-          invoke("update_watch_progress", {
-            payload: {
-              filePath: ep.filePath,
-              lastPosition: watched ? ep.duration || ep.lastPosition || 0 : 0,
-              watched,
-            },
-          }),
-        ),
-      );
+      await invoke("set_watched_cmd", {
+        mediaIds: episodes.map((ep) => ep.id),
+        watched,
+      });
       await fetchLibrary(false);
     } catch {
       setError("Failed to update watch state.");

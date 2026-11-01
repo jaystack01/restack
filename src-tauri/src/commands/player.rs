@@ -1,14 +1,17 @@
 use crate::db::{
-    get_episode_meta, get_last_position, get_next_episode, init_schema, open_db,
+    get_episode_meta, get_next_episode, get_playback_state, init_schema, open_db, set_watched,
     update_progress,
 };
-use crate::models::{ProgressUpdatePayload, AppState};
+use crate::models::AppState;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, State};
+
+/// Fraction of the duration after which an episode counts as watched.
+const WATCHED_THRESHOLD: f64 = 0.9;
 
 #[derive(Clone, serde::Serialize)]
 struct ProgressPayload {
@@ -18,19 +21,22 @@ struct ProgressPayload {
 }
 
 #[tauri::command]
-pub fn update_watch_progress(
-    app: AppHandle,
-    payload: ProgressUpdatePayload,
-) -> Result<(), String> {
+pub fn set_watched_cmd(app: AppHandle, media_ids: Vec<i64>, watched: bool) -> Result<(), String> {
     let conn = open_db(&app)?;
     init_schema(&conn)?;
+    set_watched(&conn, &media_ids, watched)
+}
 
-    update_progress(
-        &conn,
-        &payload.file_path,
-        payload.last_position.max(0),
-        payload.watched,
-    )
+/// Once watched, stays watched (rewatching doesn't un-mark it).
+fn is_watched(previously_watched: bool, pos: f64, duration: f64) -> bool {
+    previously_watched || (duration > 0.0 && pos >= duration * WATCHED_THRESHOLD)
+}
+
+/// Resume from the saved position, unless it's in the credits zone, where a
+/// replay should start from the beginning.
+fn resume_position(last_position: i64, duration: i64) -> u64 {
+    let finished = duration > 0 && last_position as f64 >= duration as f64 * WATCHED_THRESHOLD;
+    if finished { 0 } else { last_position.max(0) as u64 }
 }
 
 #[tauri::command]
@@ -43,8 +49,9 @@ pub fn play_episode(
     let conn = open_db(&app)?;
     init_schema(&conn)?;
 
-    let db_position = get_last_position(&conn, &file_path)? as u64;
-    let start = start_seconds.unwrap_or(db_position);
+    let (last_position, duration, previously_watched) =
+        get_playback_state(&conn, &file_path)?.unwrap_or((0, 0, false));
+    let start = start_seconds.unwrap_or_else(|| resume_position(last_position, duration));
 
     // 🧠 unique socket per playback
     let socket_path = format!("/tmp/mpv-{}.sock", uuid::Uuid::new_v4());
@@ -85,13 +92,13 @@ pub fn play_episode(
     let file_clone = file_path.clone();
 
     thread::spawn(move || {
-        track_progress(app_handle, socket_path, file_clone);
+        track_progress(app_handle, socket_path, file_clone, previously_watched);
     });
 
     Ok(())
 }
 
-fn track_progress(app: AppHandle, socket_path: String, file_path: String) {
+fn track_progress(app: AppHandle, socket_path: String, file_path: String, previously_watched: bool) {
     println!("IPC connecting to {}", socket_path);
 
     // wait for mpv socket
@@ -138,7 +145,7 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String) {
                         }
 
                         if let (Some(pos), Some(duration)) = (last_pos, last_duration) {
-                            let watched = pos >= duration * 0.9;
+                            let watched = is_watched(previously_watched, pos, duration);
                             if let Ok(conn) = open_db(&app) {
                                 let _ = update_progress(&conn, &file_path, pos as i64, watched);
 
@@ -158,6 +165,16 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String) {
                             println!("Episode finished → finding next");
 
                             if let Ok(conn) = open_db(&app) {
+                                // Finished: the next play starts from the beginning
+                                let _ = update_progress(&conn, &file_path, 0, true);
+                                let _ = app.emit(
+                                    "video_progress_updated",
+                                    ProgressPayload {
+                                        file_path: file_path.clone(),
+                                        last_position: 0,
+                                        watched: true,
+                                    },
+                                );
                                 if let Some((group_id, season, episode)) = get_episode_meta(&conn, &file_path) {
                                     if let Some(next_path) = get_next_episode(&conn, group_id, season, episode) {
                                         println!("Next episode: {}", next_path);
@@ -190,5 +207,27 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String) {
 
     if let Some(next_path) = play_next_after_close {
         let _ = app.emit("play_next_episode", next_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watched_latches_once_reached() {
+        assert!(!is_watched(false, 100.0, 1000.0));
+        assert!(is_watched(false, 900.0, 1000.0));
+        assert!(is_watched(true, 5.0, 1000.0), "rewatching keeps it watched");
+        assert!(!is_watched(false, 0.0, 0.0), "unknown duration never counts as watched");
+    }
+
+    #[test]
+    fn resume_skips_the_credits_zone() {
+        assert_eq!(resume_position(600, 1200), 600);
+        assert_eq!(resume_position(1150, 1200), 0);
+        assert_eq!(resume_position(0, 1200), 0);
+        assert_eq!(resume_position(300, 0), 300, "unknown duration resumes as saved");
+        assert_eq!(resume_position(-5, 1200), 0);
     }
 }
