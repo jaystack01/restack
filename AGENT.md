@@ -33,6 +33,24 @@ cd src-tauri && cargo clippy   # lint backend
 - **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
 - **No frontend tests, no ESLint/Prettier config, no CI.** Verify changes with `npm run build`, `cargo check`, and `cargo test`.
 
+### Git workflow
+
+- `main`: released code only. Each merge into it is a release, tagged `vX.Y.Z`. Never commit to it directly.
+- `develop`: the working branch. Commit directly to it; no per-task branches. Test the combined app here before a release.
+- One commit per task: each commit covers a single TODO item (or a tightly related set) together with its TODO.md/AGENT.md updates, and references the IDs in the message ("fixes BUG-8"). Don't mix unrelated tasks in one commit.
+- Release: `git checkout main && git merge --no-ff develop && git tag vX.Y.Z`.
+
+### Multi-agent waves (how the TODO backlog is worked)
+
+The backlog is worked in **waves** of parallel agents. The maintainer has approved pushing to `origin/develop` after each wave (never `main`).
+
+- **Coordinator** (the main session) plans each wave so that no two workers touch the same file. It also owns the final review and the push.
+- **Workers** each run in their own git worktree. Each makes one commit per TODO ID, adds tests, and passes `npm run build`, `cargo check`, and `cargo test` before reporting. Workers **never edit `TODO.md` or `AGENT.md`**; they report the doc changes they want instead.
+- **Reviewers** read each worker's commits without the worker's reasoning. They check correctness and the invariants in §4/§9.
+- **Integrator** is the only writer of `TODO.md`/`AGENT.md` during a wave. It cherry-picks approved commits onto `develop` one at a time, folds the doc updates into the same commit, reruns build + tests, and reverts anything that fails. Failed or rejected tasks are marked blocked in `TODO.md` with the reason, not retried indefinitely.
+- After each wave the coordinator pauses so the maintainer can launch the app and check the UI. Agents never run the app against the real library (CLAUDE.md rule 7).
+- **Ask the maintainer before starting** FEAT-2, FEAT-7, FEAT-8, FEAT-9, FEAT-10, ARCH-3, or major-version upgrades in DEP-4.
+
 ---
 
 ## 3. Architecture
