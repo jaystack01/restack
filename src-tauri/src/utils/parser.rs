@@ -43,8 +43,12 @@ static E_ONLY_RE: LazyLock<Regex> =
 static LIGHT_CLEAN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[._]+").expect("valid"));
 // "Name - 04" or "Name-04". A dash glued to a digit ("2024-05", "12-30") is a date or
 // time separator, not an episode marker, so the name must end in a non-digit or a space.
+// Episodes run to 4 digits ("One Piece - 1071") but 19xx/20xx is a year, not an episode.
 static DASH_EP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(?:(.*?\S)\s+|(.*?[^\d\s]))-\s*(\d{1,3})(?:\s+(.+))?$").expect("valid dash-ep regex")
+    Regex::new(
+        r"(?i)^(?:(.*?\S)\s+|(.*?[^\d\s]))-\s*(\d{1,3}|(?:0\d|1[0-8]|2[1-9]|[3-9]\d)\d{2})(?:\s+(.+))?$",
+    )
+    .expect("valid dash-ep regex")
 });
 // ISO date ("2024-05-14"): screen/OBS recordings, never an episode or release year
 static DATE_RE: LazyLock<Regex> =
@@ -255,6 +259,20 @@ mod tests {
             ("[SubsPlease] Frieren - 04 (1080p) [ABCD1234]", series("Frieren", 1, 4, None)),
             ("Show-07", series("Show", 1, 7, None)),
             ("Some_Anime - 12 Finale", series("Some Anime", 1, 12, Some("Finale"))),
+        ]);
+    }
+
+    #[test]
+    fn bug38_four_digit_dash_episodes() {
+        check(&[
+            ("One_Piece_-_1071", series("One Piece", 1, 1071, None)),
+            ("[SubsPlease] Detective Conan - 1120 (1080p)", series("Detective Conan", 1, 1120, None)),
+            ("Show - 0999", series("Show", 1, 999, None)),
+            // A year after the dash is not an episode.
+            ("Show - 2019", movie("Show", 2019)),
+            ("Show - 1999 Remaster", movie("Show", 1999)),
+            ("Show - 2019 - 05", series("Show", 1, 5, None)),
+            ("Show - 12345", other("Show - 12345")),
         ]);
     }
 
