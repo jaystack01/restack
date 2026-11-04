@@ -8,9 +8,10 @@ use crate::utils::scanner::{
     collect_video_files, discover_default_scan_roots, ScanWalk, get_duration, is_confirmed_gone, reconcile_unseen,
 };
 
-use rusqlite::Connection;
+use rusqlite::{Connection, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter};
 
 #[derive(serde::Serialize, Clone)]
@@ -80,22 +81,81 @@ fn sync_library(
     // Load existing files from DB (path → soft-deleted?)
     let existing_files: HashMap<String, bool> = get_media_paths(conn)?.into_iter().collect();
     let mut seen_files: HashSet<String> = HashSet::new();
+    let mut batch = UpsertBatch::new(conn);
 
     for (index, file_path) in walk.files.iter().enumerate() {
         seen_files.insert(file_path.clone());
-        let (duration, thumb) = on_file(index, file_path, !existing_files.contains_key(file_path));
+        let is_new = !existing_files.contains_key(file_path);
+
+        // New files run ffprobe + ffmpeg (seconds each): never hold the write lock
+        // across that, or the mpv tracker's progress writes hit SQLITE_BUSY.
+        if is_new {
+            batch.commit()?;
+        }
+        let (duration, thumb) = on_file(index, file_path, is_new);
 
         let Some(stem) = Path::new(file_path).file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
 
         // Upsert — preserves watch progress, only updates metadata
-        upsert_parsed(conn, file_path, stem, duration, thumb)?;
+        batch.run(|tx| upsert_parsed(tx, file_path, stem, duration, thumb))?;
     }
+    batch.commit()?;
 
-    // Reconcile rows whose files weren't seen this scan
+    // Reconcile rows whose files weren't seen this scan (one transaction in db.rs)
     let (removed, missing) = reconcile_unseen(&existing_files, &seen_files, walk, is_confirmed_gone);
     sync_missing_media(conn, &removed, &missing)
+}
+
+/// Max upserts per scan transaction, and how long one may stay open.
+/// Tests use a small batch so they cross several commit boundaries cheaply.
+const BATCH_MAX_ROWS: usize = if cfg!(test) { 25 } else { 500 };
+const BATCH_MAX_AGE: Duration = Duration::from_secs(1);
+
+/// Groups scan upserts into short write transactions: one fsync per batch
+/// instead of per file, while keeping the write lock free for the player.
+struct UpsertBatch<'c> {
+    conn: &'c Connection,
+    tx: Option<Transaction<'c>>,
+    opened_at: Instant,
+    rows: usize,
+}
+
+impl<'c> UpsertBatch<'c> {
+    fn new(conn: &'c Connection) -> Self {
+        UpsertBatch { conn, tx: None, opened_at: Instant::now(), rows: 0 }
+    }
+
+    /// Run `f` in the open batch (opening one if needed); commits once the batch is full or old.
+    /// On error the uncommitted batch rolls back; earlier batches stay committed.
+    fn run(&mut self, f: impl FnOnce(&Connection) -> Result<(), String>) -> Result<(), String> {
+        let tx = match self.tx.take() {
+            Some(tx) => tx,
+            None => {
+                self.opened_at = Instant::now();
+                self.rows = 0;
+                self.conn
+                    .unchecked_transaction()
+                    .map_err(|e| format!("Failed to start scan transaction: {e}"))?
+            }
+        };
+        f(&tx)?;
+        self.rows += 1;
+        self.tx = Some(tx);
+
+        if self.rows >= BATCH_MAX_ROWS || self.opened_at.elapsed() >= BATCH_MAX_AGE {
+            self.commit()?;
+        }
+        Ok(())
+    }
+
+    fn commit(&mut self) -> Result<(), String> {
+        match self.tx.take() {
+            Some(tx) => tx.commit().map_err(|e| format!("Failed to commit scan batch: {e}")),
+            None => Ok(()),
+        }
+    }
 }
 
 fn upsert_parsed(
@@ -280,5 +340,70 @@ mod tests {
         crate::db::mark_restored(&conn, &b).unwrap();
         scan(&conn, &[tmp.path("")]);
         assert_eq!(visible(&conn), vec![a, b]);
+    }
+
+    #[test]
+    fn large_scan_keeps_every_row_across_batches() {
+        let tmp = TempDir::new("sync-batches");
+        let ep = |n: usize| format!("Show/Show.S{:02}E{:02}.mkv", n / 50 + 1, n % 50 + 1);
+        let total = BATCH_MAX_ROWS * 4 + 10;
+        let mut paths: Vec<String> = (0..total).map(|n| tmp.file(&ep(n))).collect();
+        paths.sort();
+        let conn = test_db();
+
+        assert_eq!(scan(&conn, &[tmp.path("")]).len(), total);
+        assert_eq!(visible(&conn), paths);
+
+        // Rescan with new files spread through the walk: only those are probed,
+        // and the unchanged rows on either side of each commit survive.
+        let mut added: Vec<String> = (0..total / 10)
+            .map(|k| tmp.file(&format!("Show/Show.S{:02}E01.mkv", 60 + k)))
+            .collect();
+        added.sort();
+        let mut probed = scan(&conn, &[tmp.path("")]);
+        probed.sort();
+        assert_eq!(probed, added);
+
+        paths.extend(added);
+        paths.sort();
+        assert_eq!(visible(&conn), paths);
+        let unprobed: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media WHERE duration != 1200", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(unprobed, 0, "rescan must not clobber probed durations");
+    }
+
+    #[test]
+    fn write_lock_is_free_while_probing_new_files() {
+        let tmp = TempDir::new("sync-lock");
+        let db_path = tmp.path("restack.db");
+        let conn = Connection::open(&db_path).unwrap();
+        init_schema(&conn).unwrap();
+        for n in 1..=20 {
+            tmp.file(&format!("Show/Show.S01E{n:02}.mkv"));
+        }
+        scan(&conn, &[tmp.path("Show")]);
+        for n in 1..=20 {
+            tmp.file(&format!("Show/Show.S02E{n:02}.mkv"));
+            tmp.file(&format!("Other/Show.S03E{n:02}.mkv"));
+        }
+
+        // Stand-in for the mpv tracker: a second connection that must not get SQLITE_BUSY
+        let player = Connection::open(&db_path).unwrap();
+        player.busy_timeout(Duration::ZERO).unwrap();
+        let walk = collect_video_files(&[tmp.path("Show"), tmp.path("Other")]);
+        let mut probes = 0;
+        sync_library(&conn, &walk, |_, _, is_new| {
+            if !is_new {
+                return (0, None);
+            }
+            probes += 1;
+            player
+                .execute("INSERT OR REPLACE INTO app_state (key, value_text) VALUES ('probe', ?1)", [probes])
+                .expect("player write during probe");
+            (1200, None)
+        })
+        .unwrap();
+        assert_eq!(probes, 40);
     }
 }

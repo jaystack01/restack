@@ -19,7 +19,7 @@ _Nothing picked yet. Move items here when you start them._
 
 1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
-3. **Make it responsive**: PERF-1, ~~PERF-6~~, PERF-7, ~~PERF-8~~ (PERF-6 and PERF-8 done 2026-11-04).
+3. **Make it responsive**: PERF-1, ~~PERF-6~~, ~~PERF-7~~, ~~PERF-8~~ (PERF-6, PERF-7 and PERF-8 done 2026-11-04).
 4. **Safety net before refactors**: CHORE-1, ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
 
@@ -38,7 +38,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Extract `fn parse_ipc_line(&str) -> Option<IpcEvent>` (pure, testable) and a small `ProgressTracker` struct that owns the `current`/`persisted`/`persisted_at` state now held as locals in `track_progress` (calling `should_persist` and the watched latch), and keep the thread loop as glue. Preserve the "emit `play_next_episode` after the loop exits" invariant.
 
 - [ ] **ARCH-3 · Medium · Improvement** — Media identity is the file path.
-  - **Location:** `src-tauri/src/db.rs:42-56` (`file_path TEXT UNIQUE`), `commands/scanner.rs:112-118`
+  - **Location:** `src-tauri/src/db.rs:42-56` (`file_path TEXT UNIQUE`), `commands/scanner.rs:161-173` (`upsert_parsed`)
   - **Problem:** Renaming or moving a file (e.g. tidying `~/Downloads` into `~/Videos/Show/`) is seen as delete + new file. Progress, watched state, `user_pinned`, and group assignment are lost, and ffprobe/ffmpeg rerun.
   - **Solution:** During a scan, before hard-deleting a missing row, try to match a new file by `(size, mtime)` or `(dev, inode)`. Store these in new additive columns. If matched, `UPDATE media SET file_path = new` instead of delete + insert.
 
@@ -66,8 +66,8 @@ _Nothing picked yet. Move items here when you start them._
 ## 🧩 Code Design and Quality
 
 - [ ] **DES-1 · Medium · Confirmed** — Multi-statement mutations aren't wrapped in transactions.
-  - **Location:** `src-tauri/src/db.rs` (`merge_groups`, `move_episodes`, `reclassify_media`), `commands/scanner.rs` upsert loop (the missing-row reconciliation is already one transaction)
-  - **Problem:** A failure halfway leaves partial state (some episodes moved, group not deleted, and so on). Loops issue one autocommit statement per row (see PERF-7 for the cost).
+  - **Location:** `src-tauri/src/db.rs` (`merge_groups`, `move_episodes`, `reclassify_media`), `commands/scanner.rs` upsert loop (scan upserts are batched into transactions since PERF-7)
+  - **Problem:** A failure halfway leaves partial state (some episodes moved, group not deleted, and so on). Loops issue one autocommit statement per row, which costs one fsync each.
   - **Solution:** Take `&mut Connection`, use `let tx = conn.transaction()?; …; tx.commit()?`. Use `UPDATE … WHERE id IN (…)` for the id loops.
 
 - [ ] **DES-2 · Low · Confirmed** — Errors are silently swallowed or dropped in the DB layer.
@@ -130,8 +130,8 @@ _Nothing picked yet. Move items here when you start them._
   - **Test:** `db::tests::merge_then_rescan_does_not_split` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **BUG-14 · Medium · Confirmed** — One bad file aborts the whole scan, silently.
-  - **Location:** `src/App.jsx:50-54`, `src-tauri/src/commands/scanner.rs:101-107`
-  - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch.
+  - **Location:** `src/App.jsx:50-54`, `src-tauri/src/commands/scanner.rs:161-167` (`upsert_parsed`)
+  - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch. Since PERF-7 a failing upsert rolls back only the current uncommitted batch (up to 500 rows); earlier batches stay committed, and the scan still aborts.
   - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
 
 - [ ] **BUG-15 · Medium · Confirmed** — Parser classifies resolution strings as episodes.
@@ -161,7 +161,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Extract a parenthesised `(19|20)\d{2}` before bracket stripping and prefer it. Otherwise use the **last** year-like token.
 
 - [ ] **BUG-19 · Medium · Confirmed** — Thumbnails are never generated for clips shorter than 15 s, and never retried.
-  - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:92-96` (only for `is_new`)
+  - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:60-66` (probe closure, only for `is_new`), `:92-95` (commit + `on_file` call)
   - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
   - **Solution:** Seek to `min(15, duration * 0.1)` (duration is known first). Regenerate when `thumbnail_path IS NULL`, the file at `thumbnail_path` no longer exists, or `duration = 0`, not only for new files.
 
@@ -270,7 +270,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Remove them (see DEP-2) until FEAT-1 needs the dialog.
 
 - [ ] **SEC-8 · Low · Potential** — Non-UTF-8 paths are stored lossily.
-  - **Location:** `src-tauri/src/commands/scanner.rs:57` (`to_string_lossy`)
+  - **Location:** `src-tauri/src/utils/scanner.rs` (`collect_video_files`, where stored paths are built), `commands/scanner.rs:47-49` (progress file name, `to_string_lossy`)
   - **Problem:** A filename with invalid UTF-8 is stored with U+FFFD. mpv, trash, and restore then target a path that doesn't exist.
   - **Solution:** Skip and log such files (simplest), or store paths as BLOB/`OsString` bytes.
 
@@ -287,7 +287,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** User-configurable scan roots (FEAT-1). Until then consider `~/Videos`, `~/Downloads`, `~/Movies`, and skip hidden dirs (BUG-20).
 
 - [ ] **PERF-3 · Medium · Improvement** — Thumbnail and duration generation is serial.
-  - **Location:** `src-tauri/src/commands/scanner.rs:94-96`
+  - **Location:** `src-tauri/src/commands/scanner.rs:61-66` (probe closure)
   - **Solution:** Parallelise with a bounded worker pool, or generate thumbnails in the background after the library is shown.
 
 - [ ] **PERF-4 · Low · Improvement** — Every command reopens the SQLite connection and re-runs `init_schema` (about 6 statements plus `PRAGMA table_info`).
@@ -298,11 +298,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/db.rs:589-606`
   - **Problem:** Fine for now; revisit with large libraries. Also, an absolute distance ≤ 2 on short names ("Dark" vs "Dare") gives false positives.
   - **Solution:** Use a relative threshold (`distance <= max(1, len/8)`) and skip groups with 0 live episodes.
-
-- [ ] **PERF-7 · High · Confirmed** — Scan upserts run without a transaction.
-  - **Location:** `src-tauri/src/commands/scanner.rs:70-118`
-  - **Problem:** Each `find_or_create_group` + upsert + delete is its own autocommit transaction (fsync each). A rescan of N unchanged files costs at least N fsyncs, which dominates rescan time once the ffprobe/ffmpeg work is skipped.
-  - **Solution:** Wrap the processing loop and the removal loop in one transaction, or commit every ~500 files so progress isn't lost on a crash.
 
 
 - [ ] **PERF-9 · Medium · Confirmed** — Regexes are recompiled on every call.
@@ -320,18 +315,18 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Compute drag ids lazily inside `onDragStart`. Wrap the handlers in `useCallback`, and make `bindEpisodeRef` stable (a single ref callback reading `data-id`).
 
 - [ ] **PERF-12 · Low · Improvement** — One `scan:progress` IPC event and one React state update per file.
-  - **Location:** `src-tauri/src/commands/scanner.rs:79-86`, `src/App.jsx:104-112`
+  - **Location:** `src-tauri/src/commands/scanner.rs:45-59`, `src/App.jsx:104-112`
   - **Solution:** Throttle to about 10 events/s (time-based) and always send the final one.
 
 - [ ] **PERF-14 · Low · Confirmed** — Orphaned thumbnails are never removed.
-  - **Location:** `src-tauri/src/commands/scanner.rs:112-118` (row deleted, jpg kept)
+  - **Location:** `src-tauri/src/commands/scanner.rs:106-108` → `db::sync_missing_media` (row deleted, jpg kept)
   - **Problem:** Evidence: the local thumbnails dir has 48 files while 2 rows reference a thumbnail.
   - **Solution:** Delete the jpg when its row is purged, and/or sweep files not referenced by any row at the end of a scan.
 
-- [ ] **PERF-15 · Low · Potential** — The tracker's long-lived connection has no busy timeout.
-  - **Location:** `src-tauri/src/commands/player.rs` `track_progress` (`open_db`); `src-tauri/src/db.rs` `open_db`
-  - **Problem:** If a scan holds a write transaction (more likely once PERF-7 wraps scans in transactions), a progress write fails right away with `SQLITE_BUSY` and is only logged, so that write is lost until the next throttled write or the final flush.
-  - **Solution:** Set `conn.busy_timeout(Duration::from_secs(2))` in `db::open_db`, or turn on WAL mode in `init_schema` (see PERF-4).
+- [ ] **PERF-15 · Low · Potential** — App connections rely on the implicit busy timeout and the rollback journal.
+  - **Location:** `src-tauri/src/db.rs:18-21` (`open_db`); `src-tauri/src/commands/player.rs` `track_progress`
+  - **Problem:** The scanner and the mpv tracker write through separate connections in the default rollback-journal mode. Since PERF-7 scans hold short write transactions (at most 500 rows or 1 s, committed before every probe). Only rusqlite's implicit 5 s default busy timeout stops a progress write from failing with `SQLITE_BUSY` while a batch commits; nothing in the code states that. Readers (`get_library_grouped` during a scan) also block on the writer, and each batch commit pays a full rollback-journal fsync.
+  - **Solution:** In `open_db`, set an explicit `busy_timeout` and `PRAGMA journal_mode=WAL` (see PERF-4). Verify with existing user DBs.
 
 ## 📦 Dependencies and Configuration
 
@@ -382,7 +377,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 35 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 37 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
 
 - [ ] **CHORE-1 · High · Improvement** — Unit tests for `utils/parser.rs`.
   - **Location:** `src-tauri/src/utils/parser.rs`
@@ -414,7 +409,7 @@ _Current state (2026-11-04): `cargo test` runs 35 backend tests (`db.rs`, `utils
   - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (after fixing BUG-13 and BUG-32), or delete the files and the unused commands. Update AGENT.md either way.
 
 - [ ] **MAINT-2 · Low · Confirmed** — Small dead code paths.
-  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:137-140` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:409` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
+  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:187-190` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:409` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
   - **Solution:** Remove these during the next touch of each file.
 
 - [ ] **MAINT-3 · Low · Confirmed** — SeriesDetail error banner is sticky and errors are generic.
@@ -438,7 +433,7 @@ _Current state (2026-11-04): `cargo test` runs 35 backend tests (`db.rs`, `utils
   - **Solution:** Cover install, runtime deps (`mpv`, `ffmpeg`, `ffprobe`), usage, and screenshots.
 
 - [ ] **CHORE-8 · Low · Improvement** — Replace `println!` debugging with proper logging.
-  - **Location:** `commands/player.rs:67,95,108,113,158,163,166,188`, `commands/scanner.rs:120`
+  - **Location:** `commands/player.rs:67,95,108,113,158,163,166,188`, `commands/scanner.rs:69`
   - **Solution:** Use `log` + `tauri-plugin-log`.
 
 - [ ] **CHORE-9 · Low · Confirmed** — Remove unused Vite template leftovers.
@@ -479,6 +474,7 @@ _Current state (2026-11-04): `cargo test` runs 35 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **PERF-7**: `sync_library` commits upserts in batches (`UpsertBatch`: 500 rows or 1 s) and commits before probing each new file, so the write lock is never held during ffprobe/ffmpeg. Removal was already one transaction in `sync_missing_media`. Tests cover batch boundaries and a concurrent writer during probes.
 - [x] 2026-11-04 **PERF-13**: `init_schema` creates `idx_media_type_live ON media(media_type, deleted_at, missing_since)` after the ADD COLUMN migrations, matching the live-row filter used by every library query (wider than the planned `(media_type, deleted_at)` index, since `missing_since` is part of every live-row filter). A test covers an old-schema DB, idempotency, and that the query planner uses the index.
 - [x] 2026-11-04 **PERF-6**: the mpv tracker reuses one DB connection and writes and emits progress at most every 5 s (position or wall time), right away when watched flips, and on pause or any loop exit (pure `should_persist`, tested). Watched now latches for the whole session. The store's `updateEpisodeProgress` patches only the path to the matching item and skips no-op notifications.
 - [x] 2026-11-04 **BUG-25**: App.jsx's startup effect uses a `cancelled` flag. Tauri listeners that resolve after cleanup are unlistened immediately, and the discarded StrictMode mount skips the cached library load and doSync, so events no longer fire twice.

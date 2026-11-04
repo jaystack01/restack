@@ -151,6 +151,7 @@ media (
 - Two passes: collect files → emit `scan:start {total_files}` → per-file `scan:progress {current,total,file_name}`.
 - ffprobe duration + ffmpeg thumbnail run **only for files not already in the DB** (expensive).
 - `commands/scanner.rs::sync_library` does the upserts and reconciliation without an `AppHandle`; the command passes a closure that emits progress and probes new files.
+- `sync_library` commits upserts in batches (`UpsertBatch`: 500 rows or 1 s) and commits the open batch before probing each new file, so SQLite's write lock is never held across ffprobe/ffmpeg (the mpv tracker writes progress on its own connection during scans). The reconcile step runs afterwards in `sync_missing_media`'s own transaction, so don't call `sync_missing_media` while a batch is open: `unchecked_transaction` would nest.
 - After the scan, rows whose `file_path` wasn't seen are reconciled (`utils/scanner.rs::reconcile_unseen`, then `db::sync_missing_media`):
   - Only rows under a root that existed and was walked **this** scan are considered, minus subtrees that had walk errors. `scan_and_sync(root)` never touches rows outside `root`.
   - Soft-deleted rows (`deleted_at` set) are never touched, so Undo keeps working.
