@@ -74,7 +74,8 @@ The frontend **never** touches the filesystem or DB directly; everything goes th
 ```
 src/
   main.jsx                   HashRouter + StrictMode
-  App.jsx                    Routes, startup scan, all global Tauri event listeners, Ctrl/Cmd+R = rescan
+  App.jsx                    Routes, cached library on startup then background scan, all global
+                             Tauri event listeners, Ctrl/Cmd+R = rescan
   index.css                  Tailwind v4 `@theme` design tokens (colors, fonts, shadows)
   store/libraryStore.js      Hand-rolled pub/sub store (library + currently playing path)
   layouts/MainLayout.jsx     Shell: Sidebar + main + TopSyncBar + FirstScanOverlay
@@ -311,4 +312,4 @@ Still backlog: subtitle management, optional TMDB metadata, multi-user profiles,
 - Never renumber or reuse IDs. Commits may reference them ("fixes BUG-2").
 - If an item changes a documented invariant, sharp edge, command, or schema, update the relevant section of this file in the same change.
 
-*Last updated: 2026-11-01*
+*Last updated: 2026-11-04*

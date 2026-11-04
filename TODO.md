@@ -19,7 +19,7 @@ _Nothing picked yet. Move items here when you start them._
 
 1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
-3. **Make it responsive**: PERF-1, PERF-6, PERF-7, PERF-8.
+3. **Make it responsive**: PERF-1, PERF-6, PERF-7, ~~PERF-8~~ (done 2026-11-04).
 4. **Safety net before refactors**: CHORE-1, ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
 
@@ -129,10 +129,10 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** ARCH-4 (aliases). Also only call `find_or_create_group` when the row is new or `group_id IS NULL`.
   - **Test:** `db::tests::merge_then_rescan_does_not_split` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
-- [ ] **BUG-14 · Medium · Confirmed** — A failed startup scan shows an empty library even though the DB has data.
-  - **Location:** `src/App.jsx:45-49,60-63`
-  - **Problem:** If `scan_user_storage` throws (any single upsert error aborts it via `?`, `commands/scanner.rs:101-107`), `libraryData` stays null, the overlay is dismissed, and every page renders empty with no error. This repeats on every launch.
-  - **Solution:** On error, fall back to `invoke("get_library_grouped")` and show a non-blocking error (FEAT-3). In the scanner, log and skip per-file failures instead of aborting the whole scan.
+- [ ] **BUG-14 · Medium · Confirmed** — One bad file aborts the whole scan, silently.
+  - **Location:** `src/App.jsx:45-49`, `src-tauri/src/commands/scanner.rs:101-107`
+  - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch.
+  - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
 
 - [ ] **BUG-15 · Medium · Confirmed** — Parser classifies resolution strings as episodes.
   - **Location:** `src-tauri/src/utils/parser.rs:64` (`(\d+)x(\d+)`)
@@ -194,7 +194,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Keep the timer id in a ref and clear it at the start of `doSync`.
 
 - [ ] **BUG-25 · Medium · Confirmed** — Event listeners leak and double-fire under StrictMode.
-  - **Location:** `src/App.jsx:72-136`, `src/main.jsx` (StrictMode)
+  - **Location:** `src/App.jsx:72-148`, `src/main.jsx` (StrictMode)
   - **Problem:** `listen()` is async. StrictMode's mount/unmount/mount runs the cleanup before the promises resolve, so the first set of unlisteners is never called. In `npm run tauri dev`, every event is handled twice: `play_next_episode` calls `play_episode` twice (killing the just-spawned mpv), and progress updates double.
   - **Solution:** Use `let cancelled = false;` and, after each `await listen(...)`, `if (cancelled) unlisten(); else cleanupFns.push(unlisten)`. Set `cancelled = true` in cleanup.
 
@@ -209,7 +209,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Refetch on `video_playback_stopped` / library changes (subscribe), and add error handling.
 
 - [ ] **BUG-28 · Low · Confirmed** — A stale stop event clears "Playing" when the same file is replayed.
-  - **Location:** `src/App.jsx:113-117`, `src-tauri/src/commands/player.rs:65-71,189`
+  - **Location:** `src/App.jsx:125-129`, `src-tauri/src/commands/player.rs:65-71,189`
   - **Problem:** Replaying the same file kills the old mpv. The old tracker's `video_playback_stopped(path)` arrives after the new `video_playback_started(path)`, and the path compare passes, so the UI shows nothing playing.
   - **Solution:** Include a playback session id (the socket uuid) in the start/stop payloads and compare that.
 
@@ -314,10 +314,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Each `find_or_create_group` + upsert + delete is its own autocommit transaction (fsync each). A rescan of N unchanged files costs at least N fsyncs, which dominates rescan time once the ffprobe/ffmpeg work is skipped.
   - **Solution:** Wrap the processing loop and the removal loop in one transaction, or commit every ~500 files so progress isn't lost on a crash.
 
-- [ ] **PERF-8 · High · Confirmed** — The UI is blocked behind a full `$HOME` scan on every launch.
-  - **Location:** `src/App.jsx:102` then `doSync`; `src/layouts/MainLayout.jsx:62-67` (overlay until `hasLibraryLoaded`)
-  - **Problem:** The cached library in SQLite is never shown first, so every launch waits for a full filesystem walk.
-  - **Solution:** On mount, `setLibrary(await invoke("get_library_grouped"))` and set `hasLibraryLoaded`. Then run the scan in the background with the TopSyncBar. Keep the full overlay only when the DB is empty.
 
 - [ ] **PERF-9 · Medium · Confirmed** — Regexes are recompiled on every call.
   - **Location:** `src-tauri/src/utils/parser.rs:5-11` (`clean_text`, 4 regexes, called 2–4× per file), `:45`, `:62-66`, `:93`, `:105-106`
@@ -467,7 +463,7 @@ _Current state (2026-11-01): `cargo test` runs 32 backend tests (`db.rs`, `utils
 
 - [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold.
 - [ ] **FEAT-2 (Medium)** Incremental updates via filesystem watching (`notify` crate) instead of full rescans.
-- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Silent catches today: `App.jsx:47,125`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
+- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Silent catches today: `App.jsx:47,109,137`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
 - [ ] **FEAT-4 (Medium)** Startup dependency check for `mpv`, `ffmpeg`, `ffprobe` with a friendly message.
 - [ ] **FEAT-5 (Low)** Search / filter across the library.
 - [ ] **FEAT-6 (Low)** Manually edit season/episode numbers for a file (sets `user_pinned`).
@@ -493,6 +489,7 @@ _Current state (2026-11-01): `cargo test` runs 32 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **PERF-8**: startup shows the library saved in the DB (`get_library_grouped`) before the scan, which then runs in the background behind the TopSyncBar. The full-screen overlay only appears when the DB is empty. A failed scan no longer blanks a cached library (rest of BUG-14 still open).
 - [x] 2026-11-01 **SEC-3**: `migrate_existing_groups` only backfills series, runs once (guarded by `app_state.migration_groups_v1`), and on that run clears phantom groups from movies/others and deletes groups with no rows.
 - [x] 2026-11-01 **BUG-10**: the Continue Watching pointer is only set for, and only resolves to, series rows.
 - [x] 2026-11-01 **BUG-11**: replaced `update_watch_progress` with `set_watched_cmd({ mediaIds, watched })`: one transaction, position reset to 0, Continue Watching pointer untouched. SeriesDetail makes one call instead of N parallel ones.

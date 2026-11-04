@@ -98,6 +98,18 @@ function App() {
       ]);
       cleanupFns.push(unlistenStart, unlistenProgress);
 
+      // Show the library saved in the DB right away, so returning users don't
+      // wait for the walk. An empty DB keeps the first-scan overlay up.
+      try {
+        const cached = await invoke("get_library_grouped");
+        if (cached.series.length || cached.movies.length || cached.others.length) {
+          setLibrary(cached);
+          setHasLibraryLoaded(true);
+        }
+      } catch {
+        // fall through to the scan
+      }
+
       // Now safe to scan — listeners are live
       doSync();
 

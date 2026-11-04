@@ -8,6 +8,7 @@ import { Film } from "lucide-react";
  *   2. Scan running, discovering files — isSyncing=true, total=0
  *   3. Scan running, indexing files — isSyncing=true, total>0
  * Dismissed automatically when the scan completes (hasLibraryLoaded → true).
+ * Skipped entirely when the DB already has a library to show.
  */
 export default function FirstScanOverlay({ scanState, isSyncing, visible }) {
   const { current, total, currentFile } = scanState;

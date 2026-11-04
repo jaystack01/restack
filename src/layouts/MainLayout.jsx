@@ -59,7 +59,7 @@ function MainLayout({ children, onSync, isSyncing, scanState, hasLibraryLoaded }
         </div>
       </main>
 
-      {/* Full-screen overlay — shown while library hasn't loaded yet (covers first scan + startup) */}
+      {/* Full-screen overlay — shown only until a library is available (empty DB on first scan) */}
       <FirstScanOverlay
         scanState={scanState}
         isSyncing={isSyncing}
