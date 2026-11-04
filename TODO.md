@@ -229,6 +229,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** 4-digit dash episodes accept 1000-1899 and 2100-9999, so `Show - 1080` or `Show - 2160` (no `p`) becomes S1E1080 / S1E2160. With the `p` suffix it is stripped and falls through correctly. Found in review, not seen in a real library.
   - **Solution:** Reject common vertical resolutions (`1080`, `1440`, `2160`, `4320`) as 4-digit dash episodes, or require a 4-digit episode to sit next to a show whose other files also use 3+ digit numbering.
 
+- [ ] **BUG-41 · Medium · Confirmed** — Parser fixes that change a show name split existing shows when new episodes arrive.
+  - **Location:** `src-tauri/src/db.rs` `upsert_episode` (`group_id = CASE … WHEN media.group_id IS NULL THEN excluded.group_id ELSE media.group_id END`), `find_or_create_group`; triggered by BUG-17 (2026-11-04)
+  - **Problem:** An existing unpinned series row keeps its `group_id` on rescan; only `show_name` is updated. After BUG-17 strips trailing years and fixes `S01.E02`, old `Doctor.Who.2005.S01E01` rows stay in group "Doctor Who 2005", while a newly added `Doctor.Who.2005.S01E09` parses as "Doctor Who" and lands in a different (new or existing) group, splitting the show. Same for `show s01`-style groups. Rows that change *type* (series → movie/other) are unaffected, because type changes clear `group_id`. Verified by reading the upsert; not reproduced against a real library.
+  - **Solution:** Decide with ARCH-4/BUG-13 (aliases), since naively re-deriving `group_id` from `show_name` would undo merges and moves. A cheap interim option: when a rescan finds an unpinned row whose group's `normalized_name` differs from `normalize_name(show_name)` *and* that group has no pinned rows, move it to the parsed group and garbage-collect the emptied group (BUG-5). Add a db test with a pre-BUG-17 group.
+
 ## 🔐 Security and Data Integrity
 
 
