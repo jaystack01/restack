@@ -44,7 +44,7 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **ARCH-4 · Medium · Improvement** — Group identity has no alias concept, so merges and moves don't steer future scans.
   - **Location:** `src-tauri/src/db.rs:127-148` (`find_or_create_group`), `:450-468` (`merge_groups`)
-  - **Problem:** Groups are keyed only by `normalized_name`. After a merge, the source name is gone, so the next file with that name creates a fresh group (see BUG-13). The same goes for any show whose release names vary ("Show 2005" vs "Show", BUG-17).
+  - **Problem:** Groups are keyed only by `normalized_name`. After a merge, the source name is gone, so the next file with that name creates a fresh group (see BUG-13). The same goes for any show whose release names vary in ways the parser doesn't normalize (a trailing year is stripped since BUG-17).
   - **Solution:** Add an additive `show_group_aliases(normalized_name TEXT PRIMARY KEY, group_id INTEGER)` table. `find_or_create_group` checks aliases first. `merge_groups` inserts the source's normalized name as an alias of the target.
 
 - [ ] **ARCH-5 · Medium · Improvement** — No frontend API layer: `invoke()` strings and arg shapes are scattered across about 10 files.
@@ -112,9 +112,9 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/db.rs` (`get_all_groups`, `get_merge_suggestions`)
   - **Solution:** `LEFT JOIN media m ON m.group_id = sg.id AND m.deleted_at IS NULL AND m.missing_since IS NULL AND m.media_type = 'series'`.
 
-- [ ] **BUG-5 · Low · Confirmed** — Empty `show_groups` are never cleaned up.
+- [ ] **BUG-5 · Medium · Confirmed** — Empty `show_groups` are never cleaned up.
   - **Location:** `src-tauri/src/db.rs` (only merge and the one-time `migrate_existing_groups` run delete groups); amplified by BUG-13
-  - **Problem:** The one-time migration (2026-11-01) clears the backlog once, but nothing collects groups emptied later by moves, reclassify, or deleted files. Evidence before that: the local DB has 43 groups and **0** of them have a live series episode. They still appear in `get_all_groups` pickers and merge suggestions.
+  - **Problem:** The one-time migration (2026-11-01) clears the backlog once, but nothing collects groups emptied later by moves, reclassify, or deleted files. Evidence before that: the local DB has 43 groups and **0** of them have a live series episode. They still appear in `get_all_groups` pickers and merge suggestions. The 2026-11-04 parser fixes (BUG-15 to BUG-17) make this worse: on the next rescan unpinned rows leave junk groups such as "Inception 2010" (S1920), "Screencast from 2024 05" and "Doctor Who 2005" empty, one per old misparse.
   - **Solution:** Run `DELETE FROM show_groups WHERE id NOT IN (SELECT DISTINCT group_id FROM media WHERE group_id IS NOT NULL)` at the end of each scan and after move/reclassify/merge. Keep alias rows (ARCH-4) pointing to live groups only.
 
 
@@ -133,17 +133,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src/App.jsx:50-54`, `src-tauri/src/commands/scanner.rs:161-167` (`upsert_parsed`)
   - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch. Since PERF-7 a failing upsert rolls back only the current uncommitted batch (up to 500 rows); earlier batches stay committed, and the scan still aborts.
   - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
-
-- [ ] **BUG-17 · Medium · Confirmed** — Multi-episode and year-suffixed releases are misgrouped.
-  - **Location:** `src-tauri/src/utils/parser.rs:23-29` (`SERIES_RES`)
-  - **Problem:**
-    1. `Breaking.Bad.S01E01E02` becomes **Other** (the `$` anchor fails on the trailing `E02`).
-    2. `Doctor.Who.2005.S01E01` gives show "Doctor Who 2005", a different group from "Doctor Who" (Levenshtein 4, so no merge suggestion either).
-    3. `show.s01.e02` gives show "show s01".
-  - **Solution:**
-    1. Allow `(?:E\d+)*` after the first episode.
-    2. Strip a trailing `(19|20)\d{2}` from `show_name`.
-    3. Support `S(\d+)\s*E(\d+)`.
 
 - [ ] **BUG-18 · Low · Confirmed** — Movie year picks the first year-like number.
   - **Location:** `src-tauri/src/utils/parser.rs:18-20` (`MOVIE_YEAR_RE`), `:71`
@@ -238,6 +227,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/utils/parser.rs:34-36` (`DASH_EP_RE`, `\d{1,3}`)
   - **Problem:** Long-running anime such as `One_Piece_-_1071` falls to Other.
   - **Solution:** Allow `\d{1,4}` but guard against years (reject 19xx/20xx when a date pattern is present, see BUG-16). Add a test case.
+
+- [ ] **BUG-39 · Low · Improvement** — Show names that really end in a year lose it.
+  - **Location:** `src-tauri/src/utils/parser.rs` `series_show_name` / `SHOW_YEAR_RE`
+  - **Problem:** The BUG-17 trailing-year strip turns `Space.1999.S01E01` into "Space", and different shows that share a base name merge, e.g. `The.Flash.2014` and `The.Flash.1990` both become "The Flash". Grouping stays consistent and `rename_group` fixes the display name, but the two series end up in one group. Cosmetic variant: `Show 1999-2000 - 05` gives "Show 1999", because only one trailing year is stripped after `clean_text`.
+  - **Solution:** If this shows up in practice, keep the year when there are both a yeared and an unyeared group for the same base name. Or record the stripped year on the row (additive column) and include it in the group key only when two years collide.
 
 ## 🔐 Security and Data Integrity
 
@@ -367,7 +361,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 48 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 3 `#[ignore]`d tests that reproduce open bugs BUG-13, BUG-17 and BUG-18. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 49 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 2 `#[ignore]`d tests that reproduce open bugs BUG-13 and BUG-18. No frontend tests, no CI._
 
 
 
@@ -459,6 +453,7 @@ _Current state (2026-11-04): `cargo test` runs 48 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **BUG-17**: SxxExx accepts multi-episode tags (`S01E01E02` is episode 1) and `S01 E02`. Series show names drop a trailing 19xx/20xx year (`Doctor.Who.2005.S01E01` is "Doctor Who"); a name that is only a year (`1923`) keeps it. Unpinned rows regroup on the next rescan and leave their old yeared groups empty (see BUG-5).
 - [x] 2026-11-04 **BUG-16**: The dash-episode pattern needs a space or a non-digit before the dash, and an ISO date in the name turns off the dash fallback. Date-stamped recordings (Screencast/OBS) now stay Other instead of becoming a series or a Movie titled by their prefix.
 - [x] 2026-11-04 **BUG-15**: NxNN is now bounded to a 1-2 digit season and 1-3 digit episode at a word boundary, and `clean_text` strips WxH resolution tags. `Inception.2010.1920x1080` is now Movie "Inception" (2010).
 - [x] 2026-11-04 **CHORE-1**: table-driven `#[cfg(test)]` module in `utils/parser.rs` covers SxxExx, NxNN, Season/Episode, E-only, anime dash, movies with year, years as titles (1917, 2012, 1923) and the Other fallback. BUG-15 to BUG-18 each have an `#[ignore = "BUG-xx: …"]` test asserting the correct behaviour (`bug15_resolution_is_not_an_episode`, `bug16_timestamped_recordings_are_not_series`, `bug17_multi_episode_and_year_suffixed_series`, `bug18_movie_year_prefers_release_year`); remove the ignore when fixing each.

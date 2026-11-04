@@ -23,11 +23,16 @@ static MOVIE_YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
 // NxNN is bounded (season 1-2 digits, episode 1-3) so resolutions like 1920x1080 never match.
 static SERIES_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
     [
-        Regex::new(r"(?i)^(.+?)\s*S(\d+)E(\d+)(?:\s+(.+))?$").expect("valid primary regex"),
+        // "S01E02", "S01 E02", multi-episode "S01E01E02" (episode = first)
+        Regex::new(r"(?i)^(.+?)\s*S(\d+)\s*E(\d+)(?:\s*E\d+)*(?:\s+(.+))?$").expect("valid primary regex"),
         Regex::new(r"(?i)^(.+?)\s*\b(\d{1,2})x(\d{1,3})(?:\s+(.+))?$").expect("valid fallback regex"),
         Regex::new(r"(?i)^(.+?)\s*Season\s*(\d+)\s*Episode\s*(\d+)(?:\s+(.+))?$").expect("valid fallback regex"),
     ]
 });
+
+// Trailing year on a show name ("Doctor Who 2005") so reboots tagged by year share a group
+static SHOW_YEAR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(.+?)\s+(?:19|20)\d{2}$").expect("valid show year regex"));
 
 static E_ONLY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+E(\d{1,3})(?:\s+(.+))?$").expect("valid E-only regex"));
@@ -85,6 +90,15 @@ pub fn parse_filename(stem: &str) -> ParsedMedia {
     ParsedMedia::Other { raw_name: stem.to_string() }
 }
 
+/// Cleaned show name with a trailing year removed; a name that is only a year ("1923") stays.
+fn series_show_name(raw: &str) -> String {
+    let cleaned = clean_text(raw);
+    match SHOW_YEAR_RE.captures(&cleaned) {
+        Some(caps) => caps[1].to_string(),
+        None => cleaned,
+    }
+}
+
 /// Series parsing logic — returns None if no series pattern matches.
 fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
     let cleaned = clean_text(stem);
@@ -92,7 +106,7 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
     // --- Standard patterns with explicit season + episode ---
     for pattern in SERIES_RES.iter() {
         if let Some(caps) = pattern.captures(&cleaned) {
-            let show_name = clean_text(caps.get(1)?.as_str());
+            let show_name = series_show_name(caps.get(1)?.as_str());
             let season = caps.get(2)?.as_str().parse::<u32>().ok()?;
             let episode = caps.get(3)?.as_str().parse::<u32>().ok()?;
 
@@ -116,7 +130,7 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
 
     // Pattern on cleaned text: "ShowName E04 OptionalTitle"
     if let Some(caps) = E_ONLY_RE.captures(&cleaned) {
-        let show_name = clean_text(caps.get(1)?.as_str());
+        let show_name = series_show_name(caps.get(1)?.as_str());
         let episode = caps.get(2)?.as_str().parse::<u32>().ok()?;
         let title = caps.get(3).map(|m| clean_text(m.as_str())).filter(|v| !v.is_empty());
         if !show_name.is_empty() && episode > 0 {
@@ -132,7 +146,7 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
     }
     if let Some(caps) = DASH_EP_RE.captures(&light_clean) {
         let raw_name = caps.get(1).or_else(|| caps.get(2))?.as_str();
-        let show_name = clean_text(raw_name);
+        let show_name = series_show_name(raw_name);
         let episode = caps.get(3)?.as_str().parse::<u32>().ok()?;
         let title = caps.get(4).map(|m| clean_text(m.as_str())).filter(|v| !v.is_empty());
         if !show_name.is_empty() && episode > 0 {
@@ -301,12 +315,20 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG-17: multi-episode, year-suffixed and split S/E releases misparse"]
     fn bug17_multi_episode_and_year_suffixed_series() {
         check(&[
             ("Breaking.Bad.S01E01E02", series("Breaking Bad", 1, 1, None)),
             ("Doctor.Who.2005.S01E01", series("Doctor Who", 1, 1, None)),
             ("show.s01.e02", series("show", 1, 2, None)),
+            ("Show.S02E03-E04.Double.Bill.1080p", series("Show", 2, 3, Some("Double Bill"))),
+            ("Show S01 E02 Title", series("Show", 1, 2, Some("Title"))),
+            ("Doctor.Who.2005.1x01", series("Doctor Who", 1, 1, None)),
+            ("Show 2019 - 04", series("Show", 1, 4, None)),
+            // A show whose whole name is a year keeps it.
+            ("1923.S01E01", series("1923", 1, 1, None)),
+            // Trade-off: a name that really ends in a year loses it ("Space: 1999"). All its
+            // episodes still land in one group, and rename_group can restore the display name.
+            ("Space.1999.S01E01", series("Space", 1, 1, None)),
         ]);
     }
 
