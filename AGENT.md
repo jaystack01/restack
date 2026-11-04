@@ -37,17 +37,58 @@ cd src-tauri && cargo clippy   # lint backend
 
 - `main`: released code only. Each merge into it is a release, tagged `vX.Y.Z`. Never commit to it directly.
 - `develop`: the working branch. Commit directly to it; no per-task branches. Test the combined app here before a release.
-- One commit per task: each commit covers a single TODO item (or a tightly related set) together with its TODO.md/AGENT.md updates, and references the IDs in the message ("fixes BUG-8"). Don't mix unrelated tasks in one commit.
+- One commit per task: each commit covers a single TODO item (or a tightly related set) together with its TODO.md/AGENT.md updates. Don't mix unrelated tasks in one commit.
 - Release: `git checkout main && git merge --no-ff develop && git tag vX.Y.Z`.
+
+### Commit messages
+
+[Conventional Commits](https://www.conventionalcommits.org/): `<type>(<scope>): <description>`.
+
+- **Types:** `feat`, `fix`, `refactor`, `perf`, `style`, `test`, `docs`, `chore`, `build`, `ci`, `revert`.
+- **Scopes** (use these; omit the scope when none fits, and add a new one here before using it):
+
+  | Scope | Covers |
+  |---|---|
+  | `scanner` | `commands/scanner.rs`, `utils/scanner.rs`, `utils/thumbnail.rs` |
+  | `parser` | `utils/parser.rs` |
+  | `player` | `commands/player.rs`, mpv IPC, playback events |
+  | `db` | `db.rs` schema, migrations, queries |
+  | `library` | `commands/library.rs`, delete/restore, `utils/trash.rs`, reclassify |
+  | `groups` | `commands/groups.rs`, rename/merge/move |
+  | `ui` | pages, layouts, components, styling |
+  | `store` | `src/store/libraryStore.js` |
+  | `deps` | npm/Cargo dependency changes |
+
+- Subject: lowercase, imperative mood, under 72 characters, no trailing period, no emojis, specific (never "update files" / "fix bugs").
+- Body only when it adds context, mainly *why*. TODO IDs go in a `Refs:` footer, not the subject, e.g. `Refs: PERF-6`. AI-assisted commits keep the `Co-Authored-By:` trailer after it.
+- Example:
+
+  ```
+  perf(player): throttle progress writes and patch store in place
+
+  mpv reports time-pos many times per second; persisting each tick cost
+  an fsync and a full library re-render.
+
+  Refs: PERF-6
+  Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+  ```
+
+### Git hygiene
+
+- Commits are organised around application changes. Don't make a separate commit for each edit to `CLAUDE.md`, `AGENT.md`, prompts, or agent workflow; put doc updates in the commit of the change they describe, or group related tooling/doc changes into one meaningful `docs:`/`chore:` commit.
+- Never commit temporary AI notes, intermediate plans, debugging logs, worktrees (`.claude/worktrees/`), secrets, or environment files. Keep useful project documentation, even when it is about AI tooling.
+- Stage specific paths, never blindly `git add -A`; check `git diff --cached` before committing; never include unrelated or pre-existing changes.
+- No history rewrites, `reset --hard`, or force pushes without the maintainer's explicit approval.
+- Commit and push only as authorized: the multi-agent wave workflow below may commit to `develop` and push it after a wave; anything else waits for the maintainer.
 
 ### Multi-agent waves (how the TODO backlog is worked)
 
 The backlog is worked in **waves** of parallel agents. The maintainer has approved pushing to `origin/develop` after each wave (never `main`).
 
 - **Coordinator** (the main session) plans each wave so that no two workers touch the same file. It also owns the final review and the push.
-- **Workers** each run in their own git worktree. Each makes one commit per TODO ID, adds tests, and passes `npm run build`, `cargo check`, and `cargo test` before reporting. Workers **never edit `TODO.md` or `AGENT.md`**; they report the doc changes they want instead.
+- **Workers** each run in their own git worktree. Each makes one commit per TODO ID (message per "Commit messages"), adds tests, and passes `npm run build`, `cargo check`, and `cargo test` before reporting. Workers **never edit `TODO.md` or `AGENT.md`**; they report the doc changes they want instead.
 - **Reviewers** read each worker's commits without the worker's reasoning. They check correctness and the invariants in §4/§9.
-- **Integrator** is the only writer of `TODO.md`/`AGENT.md` during a wave. It cherry-picks approved commits onto `develop` one at a time, folds the doc updates into the same commit, reruns build + tests, and reverts anything that fails. Failed or rejected tasks are marked blocked in `TODO.md` with the reason, not retried indefinitely.
+- **Integrator** is the only writer of `TODO.md`/`AGENT.md` during a wave. It cherry-picks approved commits onto `develop` one at a time, folds the doc updates into the same commit, reruns build + tests, and commits with a message that follows "Commit messages". If a task fails, it sets the half-applied change aside with `git stash push` (never `reset --hard`) and keeps going. Failed or rejected tasks are marked blocked in `TODO.md` with the reason, not retried indefinitely.
 - After each wave the coordinator pauses so the maintainer can launch the app and check the UI. Agents never run the app against the real library (CLAUDE.md rule 7).
 - **Ask the maintainer before starting** FEAT-2, FEAT-7, FEAT-8, FEAT-9, FEAT-10, ARCH-3, or major-version upgrades in DEP-4.
 
