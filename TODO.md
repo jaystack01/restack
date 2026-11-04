@@ -20,7 +20,7 @@ _Nothing picked yet. Move items here when you start them._
 1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
 3. **Make it responsive**: PERF-1, ~~PERF-6~~, ~~PERF-7~~, ~~PERF-8~~ (PERF-6, PERF-7 and PERF-8 done 2026-11-04).
-4. **Safety net before refactors**: CHORE-1, ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
+4. **Safety net before refactors**: ~~CHORE-1~~ (done 2026-11-04), ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
 
 ---
@@ -157,7 +157,7 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **BUG-18 · Low · Confirmed** — Movie year picks the first year-like number.
   - **Location:** `src-tauri/src/utils/parser.rs:18-20` (`MOVIE_YEAR_RE`), `:71`
-  - **Problem:** `Blade Runner 2049 (2017)` becomes title "Blade Runner", year 2049. The real year was in parentheses, which `clean_text` strips first.
+  - **Problem:** `Blade Runner 2049 (2017)` becomes title "Blade Runner", year 2049. The real year was in parentheses, which `clean_text` strips first. For the same reason `The.Dark.Knight.(2008)` (year only in parentheses) becomes **Other**; the parenthesised-year fix below covers it, so add that case to `bug18_movie_year_prefers_release_year` when fixing.
   - **Solution:** Extract a parenthesised `(19|20)\d{2}` before bracket stripping and prefer it. Otherwise use the **last** year-like token.
 
 - [ ] **BUG-19 · Medium · Confirmed** — Thumbnails are never generated for clips shorter than 15 s, and never retried.
@@ -243,6 +243,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/commands/player.rs` `track_progress` (final flush after the IPC loop) and `play_episode` (kills the old mpv)
   - **Problem:** Starting a different episode kills the old mpv; the old tracker's final flush calls `update_progress`, which also sets `app_state.last_watched_episode_id`. If that flush lands after the new tracker's first write, Continue Watching points at the old episode. The new tracker polls for its socket in 200 ms steps, so the old flush almost always lands first.
   - **Solution:** Have the final flush skip the pointer update when the tracker was superseded (e.g. a playback generation counter in `AppState`), or only set the pointer from the most recently started playback.
+
+- [ ] **BUG-38 · Low · Confirmed** — Dash-episode pattern rejects 4-digit episodes.
+  - **Location:** `src-tauri/src/utils/parser.rs:34-36` (`DASH_EP_RE`, `\d{1,3}`)
+  - **Problem:** Long-running anime such as `One_Piece_-_1071` falls to Other.
+  - **Solution:** Allow `\d{1,4}` but guard against years (reject 19xx/20xx when a date pattern is present, see BUG-16). Add a test case.
 
 ## 🔐 Security and Data Integrity
 
@@ -372,12 +377,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 37 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
-
-- [ ] **CHORE-1 · High · Improvement** — Unit tests for `utils/parser.rs`.
-  - **Location:** `src-tauri/src/utils/parser.rs`
-  - **Problem:** These are the highest-value first tests. BUG-15 through BUG-18 were all found with a 20-line harness.
-  - **Solution:** Write table-driven `#[cfg(test)]` cases covering SxxExx, NxNN, Season/Episode, E-only, anime dash, movies, Other, and the known false positives (resolutions, dates, multi-episode, year-suffixed shows, years in titles like `1917`/`2012`).
+_Current state (2026-11-04): `cargo test` runs 46 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 5 `#[ignore]`d tests that reproduce open bugs BUG-13 and BUG-15 to BUG-18. No frontend tests, no CI._
 
 
 
@@ -469,6 +469,7 @@ _Current state (2026-11-04): `cargo test` runs 37 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **CHORE-1**: table-driven `#[cfg(test)]` module in `utils/parser.rs` covers SxxExx, NxNN, Season/Episode, E-only, anime dash, movies with year, years as titles (1917, 2012, 1923) and the Other fallback. BUG-15 to BUG-18 each have an `#[ignore = "BUG-xx: …"]` test asserting the correct behaviour (`bug15_resolution_is_not_an_episode`, `bug16_timestamped_recordings_are_not_series`, `bug17_multi_episode_and_year_suffixed_series`, `bug18_movie_year_prefers_release_year`); remove the ignore when fixing each.
 - [x] 2026-11-04 **PERF-9**: every parser regex in `utils/parser.rs` is a `std::sync::LazyLock<Regex>` static compiled once (no new crate). Patterns and matching order are unchanged.
 - [x] 2026-11-04 **PERF-7**: `sync_library` commits upserts in batches (`UpsertBatch`: 500 rows or 1 s) and commits before probing each new file, so the write lock is never held during ffprobe/ffmpeg. Removal was already one transaction in `sync_missing_media`. Tests cover batch boundaries and a concurrent writer during probes.
 - [x] 2026-11-04 **PERF-13**: `init_schema` creates `idx_media_type_live ON media(media_type, deleted_at, missing_since)` after the ADD COLUMN migrations, matching the live-row filter used by every library query (wider than the planned `(media_type, deleted_at)` index, since `missing_since` is part of every live-row filter). A test covers an old-schema DB, idempotency, and that the query planner uses the index.

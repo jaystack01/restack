@@ -30,7 +30,7 @@ cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dir
 cd src-tauri && cargo clippy   # lint backend
 ```
 
-- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
+- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, with BUG-15 to BUG-18 as `#[ignore]`d tests), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
 - **No frontend tests, no ESLint/Prettier config, no CI.** Verify changes with `npm run build`, `cargo check`, and `cargo test`.
 
 ### Git workflow

@@ -133,3 +133,159 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
 
     None
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Comparable view of `ParsedMedia` (which has no Debug/PartialEq).
+    #[derive(Debug, PartialEq)]
+    enum Got {
+        Series(String, u32, u32, Option<String>),
+        Movie(String, Option<u32>),
+        Other(String),
+    }
+
+    fn parse(stem: &str) -> Got {
+        match parse_filename(stem) {
+            ParsedMedia::Series(p) => Got::Series(p.show_name, p.season, p.episode, p.title),
+            ParsedMedia::Movie { title, year } => Got::Movie(title, year),
+            ParsedMedia::Other { raw_name } => Got::Other(raw_name),
+        }
+    }
+
+    fn series(show: &str, season: u32, episode: u32, title: Option<&str>) -> Got {
+        Got::Series(show.into(), season, episode, title.map(Into::into))
+    }
+
+    fn movie(title: &str, year: u32) -> Got {
+        Got::Movie(title.into(), Some(year))
+    }
+
+    fn other(raw: &str) -> Got {
+        Got::Other(raw.into())
+    }
+
+    fn check(cases: &[(&str, Got)]) {
+        for (stem, want) in cases {
+            assert_eq!(&parse(stem), want, "stem: {stem:?}");
+        }
+    }
+
+    #[test]
+    fn clean_text_strips_brackets_punctuation_and_tags() {
+        assert_eq!(clean_text("[Group] Show.Name_(2020)-1080p.WEB-DL.x265"), "Show Name");
+        assert_eq!(clean_text("  a..b   c "), "a b c");
+        assert_eq!(clean_text("[only tags] 1080p"), "");
+    }
+
+    #[test]
+    fn parses_sxxexx() {
+        check(&[
+            ("Breaking.Bad.S01E02.Gray.Matter.1080p.WEB-DL.x264", series("Breaking Bad", 1, 2, Some("Gray Matter"))),
+            ("the.office.s03e10", series("the office", 3, 10, None)),
+            ("Show Name S10E100", series("Show Name", 10, 100, None)),
+            ("[Group] Show_Name_S02E05_[1080p]", series("Show Name", 2, 5, None)),
+        ]);
+    }
+
+    #[test]
+    fn parses_nxnn() {
+        check(&[
+            ("Friends 1x05 The One Where", series("Friends", 1, 5, Some("The One Where"))),
+            ("The.Simpsons.10x05", series("The Simpsons", 10, 5, None)),
+        ]);
+    }
+
+    #[test]
+    fn parses_season_episode_words() {
+        check(&[
+            ("Show Name Season 2 Episode 3", series("Show Name", 2, 3, None)),
+            ("Show.Name.Season.1.Episode.12.Pilot", series("Show Name", 1, 12, Some("Pilot"))),
+        ]);
+    }
+
+    #[test]
+    fn parses_episode_only_as_season_one() {
+        check(&[
+            ("Naruto E04 The Title", series("Naruto", 1, 4, Some("The Title"))),
+            ("Some.Show.E12", series("Some Show", 1, 12, None)),
+        ]);
+    }
+
+    #[test]
+    fn parses_anime_dash_episode_as_season_one() {
+        check(&[
+            ("[SubsPlease] Frieren - 04 (1080p) [ABCD1234]", series("Frieren", 1, 4, None)),
+            ("Show-07", series("Show", 1, 7, None)),
+            ("Some_Anime - 12 Finale", series("Some Anime", 1, 12, Some("Finale"))),
+        ]);
+    }
+
+    #[test]
+    fn parses_movies_with_year() {
+        check(&[
+            ("Inception.2010.1080p.BluRay.x264", movie("Inception", 2010)),
+            ("The Dark Knight 2008", movie("The Dark Knight", 2008)),
+            ("Some_Movie_1999_REMUX", movie("Some Movie", 1999)),
+        ]);
+    }
+
+    #[test]
+    fn titles_that_are_years_keep_their_name() {
+        check(&[
+            ("1917.2019.1080p.BluRay", movie("1917", 2019)),
+            ("2012.2009.720p", movie("2012", 2009)),
+            ("1923.S01E01", series("1923", 1, 1, None)),
+            // A bare year has no separate title, so it can't be told apart from a year tag.
+            ("1917", other("1917")),
+        ]);
+    }
+
+    #[test]
+    fn falls_back_to_other_with_raw_stem() {
+        check(&[
+            ("random_clip", other("random_clip")),
+            ("VID_20240514_123045", other("VID_20240514_123045")),
+            ("[1080p]", other("[1080p]")),
+            ("", other("")),
+        ]);
+    }
+
+    #[test]
+    #[ignore = "BUG-15: resolution 1920x1080 parses as S1920E1080"]
+    fn bug15_resolution_is_not_an_episode() {
+        check(&[
+            ("Inception.2010.1920x1080", movie("Inception", 2010)),
+            ("Home.Video.1280x720", other("Home.Video.1280x720")),
+        ]);
+    }
+
+    #[test]
+    #[ignore = "BUG-16: date/time-stamped recordings parse as series"]
+    fn bug16_timestamped_recordings_are_not_series() {
+        for stem in ["Screencast from 2024-05-14 12-30-45", "OBS 2024-05-14 10-30-12"] {
+            let got = parse(stem);
+            assert!(!matches!(got, Got::Series(..)), "stem: {stem:?} parsed as {got:?}");
+        }
+    }
+
+    #[test]
+    #[ignore = "BUG-17: multi-episode, year-suffixed and split S/E releases misparse"]
+    fn bug17_multi_episode_and_year_suffixed_series() {
+        check(&[
+            ("Breaking.Bad.S01E01E02", series("Breaking Bad", 1, 1, None)),
+            ("Doctor.Who.2005.S01E01", series("Doctor Who", 1, 1, None)),
+            ("show.s01.e02", series("show", 1, 2, None)),
+        ]);
+    }
+
+    #[test]
+    #[ignore = "BUG-18: movie year takes the first year-like number"]
+    fn bug18_movie_year_prefers_release_year() {
+        check(&[
+            ("Blade Runner 2049 (2017)", movie("Blade Runner 2049", 2017)),
+            ("Blade.Runner.2049.2017.1080p", movie("Blade Runner 2049", 2017)),
+        ]);
+    }
+}
