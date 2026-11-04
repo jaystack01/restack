@@ -130,7 +130,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Test:** `db::tests::merge_then_rescan_does_not_split` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **BUG-14 · Medium · Confirmed** — One bad file aborts the whole scan, silently.
-  - **Location:** `src/App.jsx:45-49`, `src-tauri/src/commands/scanner.rs:101-107`
+  - **Location:** `src/App.jsx:50-54`, `src-tauri/src/commands/scanner.rs:101-107`
   - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch.
   - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
 
@@ -188,13 +188,8 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** The previous `timeoutId` is overwritten without `clearTimeout`, so the first timer clears the second banner. Undo also covers only the last batch, and the timer isn't cleared on unmount.
   - **Solution:** `clearTimeout(recentlyDeleted?.timeoutId)` before setting a new one, and clear it in an unmount effect.
 
-- [ ] **BUG-24 · Low · Confirmed** — Scan "done" timer can reset an in-progress scan's state.
-  - **Location:** `src/App.jsx:68-69`
-  - **Problem:** Pressing Ctrl+R within 2 s of a finished sync starts a new scan, then the old `setTimeout` sets `scanState` to idle mid-scan.
-  - **Solution:** Keep the timer id in a ref and clear it at the start of `doSync`.
-
 - [ ] **BUG-25 · Medium · Confirmed** — Event listeners leak and double-fire under StrictMode.
-  - **Location:** `src/App.jsx:72-148`, `src/main.jsx` (StrictMode)
+  - **Location:** `src/App.jsx:80-158`, `src/main.jsx` (StrictMode)
   - **Problem:** `listen()` is async. StrictMode's mount/unmount/mount runs the cleanup before the promises resolve, so the first set of unlisteners is never called. In `npm run tauri dev`, every event is handled twice: `play_next_episode` calls `play_episode` twice (killing the just-spawned mpv), and progress updates double.
   - **Solution:** Use `let cancelled = false;` and, after each `await listen(...)`, `if (cancelled) unlisten(); else cleanupFns.push(unlisten)`. Set `cancelled = true` in cleanup.
 
@@ -209,7 +204,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Refetch on `video_playback_stopped` / library changes (subscribe), and add error handling.
 
 - [ ] **BUG-28 · Low · Confirmed** — A stale stop event clears "Playing" when the same file is replayed.
-  - **Location:** `src/App.jsx:125-129`, `src-tauri/src/commands/player.rs:65-71,189`
+  - **Location:** `src/App.jsx:133-137`, `src-tauri/src/commands/player.rs:65-71,189`
   - **Problem:** Replaying the same file kills the old mpv. The old tracker's `video_playback_stopped(path)` arrives after the new `video_playback_started(path)`, and the path compare passes, so the UI shows nothing playing.
   - **Solution:** Include a playback session id (the socket uuid) in the start/stop payloads and compare that.
 
@@ -330,7 +325,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Compute drag ids lazily inside `onDragStart`. Wrap the handlers in `useCallback`, and make `bindEpisodeRef` stable (a single ref callback reading `data-id`).
 
 - [ ] **PERF-12 · Low · Improvement** — One `scan:progress` IPC event and one React state update per file.
-  - **Location:** `src-tauri/src/commands/scanner.rs:79-86`, `src/App.jsx:89-97`
+  - **Location:** `src-tauri/src/commands/scanner.rs:79-86`, `src/App.jsx:97-105`
   - **Solution:** Throttle to about 10 events/s (time-based) and always send the final one.
 
 - [ ] **PERF-13 · Low · Improvement** — Missing indexes for the hot filters.
@@ -463,7 +458,7 @@ _Current state (2026-11-01): `cargo test` runs 32 backend tests (`db.rs`, `utils
 
 - [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold.
 - [ ] **FEAT-2 (Medium)** Incremental updates via filesystem watching (`notify` crate) instead of full rescans.
-- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Silent catches today: `App.jsx:47,109,137`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
+- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Silent catches today: `App.jsx:52,117,145`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
 - [ ] **FEAT-4 (Medium)** Startup dependency check for `mpv`, `ffmpeg`, `ffprobe` with a friendly message.
 - [ ] **FEAT-5 (Low)** Search / filter across the library.
 - [ ] **FEAT-6 (Low)** Manually edit season/episode numbers for a file (sets `user_pinned`).
@@ -489,6 +484,7 @@ _Current state (2026-11-01): `cargo test` runs 32 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **BUG-24**: the scan "done" → idle timer is kept in a ref and cleared when a new doSync starts and on unmount, so a quick rescan isn't reset to idle mid-scan.
 - [x] 2026-11-04 **PERF-8**: startup shows the library saved in the DB (`get_library_grouped`) before the scan, which then runs in the background behind the TopSyncBar. The full-screen overlay only appears when the DB is empty. A failed scan no longer blanks a cached library (rest of BUG-14 still open).
 - [x] 2026-11-01 **SEC-3**: `migrate_existing_groups` only backfills series, runs once (guarded by `app_state.migration_groups_v1`), and on that run clears phantom groups from movies/others and deletes groups with no rows.
 - [x] 2026-11-01 **BUG-10**: the Continue Watching pointer is only set for, and only resolves to, series rows.

@@ -31,10 +31,15 @@ function App() {
   const [scanState, setScanState] = useState(IDLE_SCAN_STATE);
   const [hasLibraryLoaded, setHasLibraryLoaded] = useState(false);
   const isSyncingRef = useRef(false);
+  // Pending "done" → idle timer, cleared when a new scan starts so it can't
+  // reset the new scan's state.
+  const doneTimerRef = useRef(null);
 
   const doSync = useCallback(async () => {
     if (isSyncingRef.current) return;
     isSyncingRef.current = true;
+    clearTimeout(doneTimerRef.current);
+    doneTimerRef.current = null;
 
     const startedAt = Date.now();
 
@@ -66,7 +71,10 @@ function App() {
 
     // Show "done" flash briefly
     setScanState((prev) => ({ ...prev, phase: "done" }));
-    setTimeout(() => setScanState(IDLE_SCAN_STATE), 2000);
+    doneTimerRef.current = setTimeout(() => {
+      doneTimerRef.current = null;
+      setScanState(IDLE_SCAN_STATE);
+    }, 2000);
   }, []);
 
   useEffect(() => {
@@ -143,6 +151,8 @@ function App() {
 
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
+      clearTimeout(doneTimerRef.current);
+      doneTimerRef.current = null;
       cleanupFns.forEach((f) => f());
     };
   }, [doSync]);
