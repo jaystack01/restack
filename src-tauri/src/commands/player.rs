@@ -3,15 +3,19 @@ use crate::db::{
     update_progress,
 };
 use crate::models::AppState;
+use rusqlite::Connection;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::process::Command;
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, State};
 
 /// Fraction of the duration after which an episode counts as watched.
 const WATCHED_THRESHOLD: f64 = 0.9;
+
+/// Minimum playback-position change (seconds) or wall time between progress writes.
+const PERSIST_INTERVAL_SECS: u64 = 5;
 
 #[derive(Clone, serde::Serialize)]
 struct ProgressPayload {
@@ -37,6 +41,39 @@ fn is_watched(previously_watched: bool, pos: f64, duration: f64) -> bool {
 fn resume_position(last_position: i64, duration: i64) -> u64 {
     let finished = duration > 0 && last_position as f64 >= duration as f64 * WATCHED_THRESHOLD;
     if finished { 0 } else { last_position.max(0) as u64 }
+}
+
+/// Throttle for progress writes. `last` is the `(position, watched)` last persisted
+/// (`None` = nothing yet). Writes when the watched flag flips (so crossing the
+/// threshold lands promptly), or when the position moved and either ≥ 5 s of
+/// position or ≥ 5 s of wall time passed since the last write.
+fn should_persist(last: Option<(i64, bool)>, pos: i64, watched: bool, since_last: Duration) -> bool {
+    let Some((last_pos, last_watched)) = last else {
+        return true;
+    };
+    if watched != last_watched {
+        return true;
+    }
+    pos != last_pos
+        && ((pos - last_pos).unsigned_abs() >= PERSIST_INTERVAL_SECS
+            || since_last >= Duration::from_secs(PERSIST_INTERVAL_SECS))
+}
+
+/// Write progress to the DB (if it opened) and tell the frontend.
+fn persist_progress(app: &AppHandle, conn: Option<&Connection>, file_path: &str, pos: i64, watched: bool) {
+    if let Some(conn) = conn {
+        if let Err(e) = update_progress(conn, file_path, pos, watched) {
+            println!("{e}");
+        }
+    }
+    let _ = app.emit(
+        "video_progress_updated",
+        ProgressPayload {
+            file_path: file_path.to_string(),
+            last_position: pos,
+            watched,
+        },
+    );
 }
 
 #[tauri::command]
@@ -125,9 +162,28 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String, previo
     let _ = stream.write_all(br#"{"command":["observe_property", 2, "duration"]}"#);
     let _ = stream.write_all(b"\n");
 
+    // 🔹 Pause is a flush point so the saved position is exact when the user stops watching
+    let _ = stream.write_all(br#"{"command":["observe_property", 3, "pause"]}"#);
+    let _ = stream.write_all(b"\n");
+
+    // One connection for the whole playback instead of one per tick
+    let conn = match open_db(&app) {
+        Ok(c) => Some(c),
+        Err(e) => {
+            println!("{e}");
+            None
+        }
+    };
+
     let reader = BufReader::new(stream.try_clone().expect("Failed to clone UnixStream"));
     let mut last_pos: Option<f64> = None;
     let mut last_duration: Option<f64> = None;
+    // Latched for the whole session: seeking back below the threshold keeps it watched
+    let mut watched_latched = previously_watched;
+    // Latest known progress vs. what was last written (throttled, see should_persist)
+    let mut current: Option<(i64, bool)> = None;
+    let mut persisted: Option<(i64, bool)> = None;
+    let mut persisted_at = Instant::now();
     // Emit after IPC loop so the frontend never kills mpv while we still write to the socket (avoids Broken pipe).
     let mut play_next_after_close: Option<String> = None;
 
@@ -136,27 +192,30 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String, previo
             if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line_str) {
                 if let Some(event) = json.get("event").and_then(|v| v.as_str()) {
                     if event == "property-change" {
-                        if let Some(name) = json.get("name").and_then(|v| v.as_str()) {
-                            if name == "time-pos" {
-                                last_pos = json.get("data").and_then(|v| v.as_f64());
-                            } else if name == "duration" {
-                                last_duration = json.get("data").and_then(|v| v.as_f64());
+                        let name = json.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                        if name == "pause" {
+                            let paused = json.get("data").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if let (true, Some((pos, watched))) = (paused && current != persisted, current) {
+                                persist_progress(&app, conn.as_ref(), &file_path, pos, watched);
+                                persisted = current;
+                                persisted_at = Instant::now();
                             }
+                            continue;
+                        }
+                        if name == "time-pos" {
+                            last_pos = json.get("data").and_then(|v| v.as_f64());
+                        } else if name == "duration" {
+                            last_duration = json.get("data").and_then(|v| v.as_f64());
                         }
 
                         if let (Some(pos), Some(duration)) = (last_pos, last_duration) {
-                            let watched = is_watched(previously_watched, pos, duration);
-                            if let Ok(conn) = open_db(&app) {
-                                let _ = update_progress(&conn, &file_path, pos as i64, watched);
-
-                                let _ = app.emit(
-                                    "video_progress_updated",
-                                    ProgressPayload {
-                                        file_path: file_path.clone(),
-                                        last_position: pos as i64,
-                                        watched,
-                                    },
-                                );
+                            watched_latched = is_watched(watched_latched, pos, duration);
+                            let pos = pos as i64;
+                            current = Some((pos, watched_latched));
+                            if should_persist(persisted, pos, watched_latched, persisted_at.elapsed()) {
+                                persist_progress(&app, conn.as_ref(), &file_path, pos, watched_latched);
+                                persisted = current;
+                                persisted_at = Instant::now();
                             }
                         }
                     } else if event == "end-file" {
@@ -164,19 +223,13 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String, previo
                         if reason == "eof" {
                             println!("Episode finished → finding next");
 
-                            if let Ok(conn) = open_db(&app) {
-                                // Finished: the next play starts from the beginning
-                                let _ = update_progress(&conn, &file_path, 0, true);
-                                let _ = app.emit(
-                                    "video_progress_updated",
-                                    ProgressPayload {
-                                        file_path: file_path.clone(),
-                                        last_position: 0,
-                                        watched: true,
-                                    },
-                                );
-                                if let Some((group_id, season, episode)) = get_episode_meta(&conn, &file_path) {
-                                    if let Some(next_path) = get_next_episode(&conn, group_id, season, episode) {
+                            // Finished: the next play starts from the beginning
+                            persist_progress(&app, conn.as_ref(), &file_path, 0, true);
+                            current = Some((0, true));
+                            persisted = current;
+                            if let Some(conn) = conn.as_ref() {
+                                if let Some((group_id, season, episode)) = get_episode_meta(conn, &file_path) {
+                                    if let Some(next_path) = get_next_episode(conn, group_id, season, episode) {
                                         println!("Next episode: {}", next_path);
                                         play_next_after_close = Some(next_path);
                                     } else {
@@ -196,6 +249,13 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String, previo
             }
         } else {
             break; // Socket error or closed
+        }
+    }
+
+    // Flush whatever the throttle held back (quit, stop, error, killed mpv)
+    if let Some((pos, watched)) = current {
+        if current != persisted {
+            persist_progress(&app, conn.as_ref(), &file_path, pos, watched);
         }
     }
 
@@ -229,5 +289,22 @@ mod tests {
         assert_eq!(resume_position(0, 1200), 0);
         assert_eq!(resume_position(300, 0), 300, "unknown duration resumes as saved");
         assert_eq!(resume_position(-5, 1200), 0);
+    }
+
+    #[test]
+    fn persist_throttles_position_ticks() {
+        let now = Duration::ZERO;
+        assert!(should_persist(None, 0, false, now), "first tick always writes");
+        assert!(!should_persist(Some((100, false)), 100, false, Duration::from_secs(60)), "no change, no write");
+        assert!(!should_persist(Some((100, false)), 103, false, Duration::from_secs(3)));
+        assert!(should_persist(Some((100, false)), 105, false, now), "5 s of position");
+        assert!(should_persist(Some((100, false)), 40, false, now), "seeking back counts too");
+        assert!(should_persist(Some((100, false)), 101, false, Duration::from_secs(5)), "5 s of wall time");
+    }
+
+    #[test]
+    fn persist_immediately_when_watched_flips() {
+        assert!(should_persist(Some((899, false)), 900, true, Duration::ZERO));
+        assert!(!should_persist(Some((900, true)), 901, true, Duration::ZERO));
     }
 }

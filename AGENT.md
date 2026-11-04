@@ -177,7 +177,7 @@ When adding a pattern, insert it at the right priority and think about false pos
 
 - `play_episode(filePath, startSeconds?)`: start = `startSeconds ??` the DB `last_position`, except that a position in the last 10% (credits) restarts from 0 (`resume_position`). Kills any previous mpv child, spawns
   `mpv <file> --input-ipc-server=/tmp/mpv-<uuid>.sock --keep-open=no --no-resume-playback --script-opts=autoload-disabled=yes --force-window=no [--start=N]`.
-- A thread observes `time-pos` and `duration` over IPC and writes progress on every change. **Watched latches** at ≥ 90% (`WATCHED_THRESHOLD`): an already-watched item stays watched while rewatching (`is_watched`). On `eof` the position resets to 0 (watched = true).
+- A thread observes `time-pos`, `duration` and `pause` over IPC on one DB connection per playback. It writes and emits progress at most every 5 s of position or wall time (`should_persist`), right away when watched flips, and on pause and when the loop exits for any reason. **Watched latches** at ≥ 90% (`WATCHED_THRESHOLD`): an already-watched item stays watched while rewatching (`is_watched`). Watched also latches within a session, so seeking back below 90% does not un-mark it. On `eof` the position resets to 0 (watched = true).
 - On `end-file` with reason `eof` it looks up the next episode in the group and emits `play_next_episode` **after** the IPC loop closes. That ordering avoids a Broken-pipe race, so don't move it.
 - `update_progress` also sets `app_state.last_watched_episode_id` for **series** rows only, which drives Continue Watching. Manual mark watched/unwatched goes through `set_watched_cmd` (one transaction, position reset to 0) and never moves that pointer.
 - Auto-play next (`get_next_episode`) and Up Next skip trashed, missing, and non-series rows.
@@ -244,7 +244,7 @@ Episode/movie/other cards set `dataTransfer` `text/plain` to `JSON.stringify({ m
 ## 6. Frontend conventions
 
 - **React 19, JSX (no TypeScript)**, function components + hooks, React Router v7 with **HashRouter** (`vite base: "./"`).
-- **State**: `libraryStore.js` only, with `getX()` / `setLibrary()` / `subscribe()` / `subscribePlaying()`. Components subscribe in `useEffect` and return the unsubscribe function. Don't add Redux/Zustand/Context for library data.
+- **State**: `libraryStore.js` only, with `getX()` / `setLibrary()` / `subscribe()` / `subscribePlaying()`. Components subscribe in `useEffect` and return the unsubscribe function. Don't add Redux/Zustand/Context for library data. `updateEpisodeProgress` copies only the path to the matching item and does not notify listeners when nothing changed.
 - After a mutating command, refresh with `invoke("get_library_grouped")` → `setLibrary(data)`. Don't rescan unless that's the intent.
 - **Styling**: Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.js`). Use the tokens in `index.css` `@theme` (`bg-bg`, `bg-surface`, `bg-surface-card`, `text-text-secondary`, `text-accent`, `border-border`, `bg-progress`, `font-display`, …) over raw colors. Compose classes with `cn()`.
 - **Motion**: `framer-motion` (`motion`, `AnimatePresence`). **Icons**: `lucide-react`.

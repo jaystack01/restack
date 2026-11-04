@@ -19,7 +19,7 @@ _Nothing picked yet. Move items here when you start them._
 
 1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
-3. **Make it responsive**: PERF-1, PERF-6, PERF-7, ~~PERF-8~~ (done 2026-11-04).
+3. **Make it responsive**: PERF-1, ~~PERF-6~~, PERF-7, ~~PERF-8~~ (PERF-6 and PERF-8 done 2026-11-04).
 4. **Safety net before refactors**: CHORE-1, ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
 
@@ -33,9 +33,9 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Move `sync_library` + `upsert_parsed` to a `services/scan.rs` when a second caller appears (e.g. FEAT-2 file watching). Low urgency now.
 
 - [ ] **ARCH-2 · Medium · Confirmed** — `player.rs` mixes four concerns in one deeply nested loop.
-  - **Location:** `src-tauri/src/commands/player.rs:101-211` (`track_progress`)
-  - **Problem:** Process lifecycle, mpv JSON-IPC protocol parsing, DB writes, and event emission are interleaved six levels deep. The watched/resume rules are already pure fns (`is_watched`, `resume_position`, tested), but throttling (PERF-6) and testing the `eof → next` ordering all require editing the same block.
-  - **Solution:** Extract `fn parse_ipc_line(&str) -> Option<IpcEvent>` (pure, testable), a small `ProgressTracker` struct that decides when to persist (throttle and watched latch), and keep the thread loop as glue. Preserve the "emit `play_next_episode` after the loop exits" invariant.
+  - **Location:** `src-tauri/src/commands/player.rs:138-271` (`track_progress`; IPC loop about 190-245)
+  - **Problem:** Process lifecycle, mpv JSON-IPC protocol parsing, DB writes, and event emission are interleaved six levels deep. The watched/resume rules and the throttle decision are already pure fns (`is_watched`, `resume_position`, `should_persist`, tested), but the loop glue and the `eof → next` ordering are still untested and live in one block.
+  - **Solution:** Extract `fn parse_ipc_line(&str) -> Option<IpcEvent>` (pure, testable) and a small `ProgressTracker` struct that owns the `current`/`persisted`/`persisted_at` state now held as locals in `track_progress` (calling `should_persist` and the watched latch), and keep the thread loop as glue. Preserve the "emit `play_next_episode` after the loop exits" invariant.
 
 - [ ] **ARCH-3 · Medium · Improvement** — Media identity is the file path.
   - **Location:** `src-tauri/src/db.rs:42-56` (`file_path TEXT UNIQUE`), `commands/scanner.rs:112-118`
@@ -239,6 +239,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** The 2026-11-01 data-loss fix keeps a row whenever deletion isn't certain. A deleted show folder, a drive that never returns, or a trashed episode leave hidden rows forever. They're invisible in the library but still hold `group_id` (BUG-5 GC can't drop those groups), count toward BUG-4 totals until that's fixed, and keep orphan thumbnails (PERF-14).
   - **Solution:** Purge `deleted_at` rows when their item is no longer in the Trash (`trash::os_limited::list`) or after N days. Offer a "Missing files" view (or a setting) to forget `missing_since` rows, and/or auto-purge after N days once FEAT-1 adds settings.
 
+- [ ] **BUG-37 · Low · Potential** — An old tracker's final flush can move Continue Watching back to the previous episode.
+  - **Location:** `src-tauri/src/commands/player.rs` `track_progress` (final flush after the IPC loop) and `play_episode` (kills the old mpv)
+  - **Problem:** Starting a different episode kills the old mpv; the old tracker's final flush calls `update_progress`, which also sets `app_state.last_watched_episode_id`. If that flush lands after the new tracker's first write, Continue Watching points at the old episode. The new tracker polls for its socket in 200 ms steps, so the old flush almost always lands first.
+  - **Solution:** Have the final flush skip the pointer update when the tracker was superseded (e.g. a playback generation counter in `AppState`), or only set the pointer from the most recently started playback.
+
 ## 🔐 Security and Data Integrity
 
 
@@ -286,18 +291,13 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Parallelise with a bounded worker pool, or generate thumbnails in the background after the library is shown.
 
 - [ ] **PERF-4 · Low · Improvement** — Every command reopens the SQLite connection and re-runs `init_schema` (about 6 statements plus `PRAGMA table_info`).
-  - **Location:** all command wrappers; also `player.rs:149,167` per progress tick
+  - **Location:** all command wrappers (the player tracker already reuses one connection per playback since PERF-6)
   - **Solution:** Hold one `Mutex<Connection>` in `AppState`. Run schema init once at startup. Enable `PRAGMA journal_mode=WAL` (currently `delete`) so the player thread doesn't contend with scans.
 
 - [ ] **PERF-5 · Low · Improvement** — Merge suggestions are O(n²) Levenshtein over all groups.
   - **Location:** `src-tauri/src/db.rs:582-599`
   - **Problem:** Fine for now; revisit with large libraries. Also, an absolute distance ≤ 2 on short names ("Dark" vs "Dare") gives false positives.
   - **Solution:** Use a relative threshold (`distance <= max(1, len/8)`) and skip groups with 0 live episodes.
-
-- [ ] **PERF-6 · High · Confirmed** — The player writes to the DB and emits an event on every mpv `time-pos` tick.
-  - **Location:** `src-tauri/src/commands/player.rs:137-163`; frontend `src/store/libraryStore.js:28-60`
-  - **Problem:** mpv reports `time-pos` many times per second. Each tick opens a **new** SQLite connection, runs two writes (each an fsync'd autocommit), and emits `video_progress_updated`. The frontend then deep-clones the whole library and re-renders every subscribed page, including the Sidebar and the O(n²) drag-id computation (PERF-11). This runs for the entire playback.
-  - **Solution:** Persist at most every ~5 s, or when the integer second changes by ≥ 5, plus on pause/end-file/quit. Reuse one connection in the thread. Emit at the same throttled rate. In the store, update only the matching episode's season array.
 
 - [ ] **PERF-7 · High · Confirmed** — Scan upserts run without a transaction.
   - **Location:** `src-tauri/src/commands/scanner.rs:70-118`
@@ -332,6 +332,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/commands/scanner.rs:112-118` (row deleted, jpg kept)
   - **Problem:** Evidence: the local thumbnails dir has 48 files while 2 rows reference a thumbnail.
   - **Solution:** Delete the jpg when its row is purged, and/or sweep files not referenced by any row at the end of a scan.
+
+- [ ] **PERF-15 · Low · Potential** — The tracker's long-lived connection has no busy timeout.
+  - **Location:** `src-tauri/src/commands/player.rs` `track_progress` (`open_db`); `src-tauri/src/db.rs` `open_db`
+  - **Problem:** If a scan holds a write transaction (more likely once PERF-7 wraps scans in transactions), a progress write fails right away with `SQLITE_BUSY` and is only logged, so that write is lost until the next throttled write or the final flush.
+  - **Solution:** Set `conn.busy_timeout(Duration::from_secs(2))` in `db::open_db`, or turn on WAL mode in `init_schema` (see PERF-4).
 
 ## 📦 Dependencies and Configuration
 
@@ -382,7 +387,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-01): `cargo test` runs 32 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 34 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
 
 - [ ] **CHORE-1 · High · Improvement** — Unit tests for `utils/parser.rs`.
   - **Location:** `src-tauri/src/utils/parser.rs`
@@ -425,7 +430,7 @@ _Current state (2026-11-01): `cargo test` runs 32 backend tests (`db.rs`, `utils
 - [ ] **MAINT-4 · Low · Confirmed** — Docs drift between AGENT.md and this TODO.
   - **Location:** `AGENT.md` §3 file map, §7 "Known issues"
   - **Problem:** The known-issues list duplicates items here and will diverge.
-  - **Solution:** Keep AGENT.md §7 to *invariants and sharp edges an agent must know* and link here for the backlog. Update it when MAINT-1 and PERF-6 land (SEC-1, SEC-3, and BUG-2 already updated §7).
+  - **Solution:** Keep AGENT.md §7 to *invariants and sharp edges an agent must know* and link here for the backlog. Update it when MAINT-1 lands (SEC-1, SEC-3, BUG-2, and PERF-6 already updated AGENT.md).
 
 - [ ] **CHORE-4 · Low · Improvement** — Split `pages/SeriesDetail.jsx` (724 lines).
   - **Solution:** Extract `useEpisodeSelection` (selection, range, keyboard), `useUndoDelete`, `SeasonSection`, and `SeriesHeader` (inline rename). Do this after BUG-8 and BUG-22 so the fixes stay small.
@@ -479,6 +484,7 @@ _Current state (2026-11-01): `cargo test` runs 32 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **PERF-6**: the mpv tracker reuses one DB connection and writes and emits progress at most every 5 s (position or wall time), right away when watched flips, and on pause or any loop exit (pure `should_persist`, tested). Watched now latches for the whole session. The store's `updateEpisodeProgress` patches only the path to the matching item and skips no-op notifications.
 - [x] 2026-11-04 **BUG-25**: App.jsx's startup effect uses a `cancelled` flag. Tauri listeners that resolve after cleanup are unlistened immediately, and the discarded StrictMode mount skips the cached library load and doSync, so events no longer fire twice.
 - [x] 2026-11-04 **BUG-24**: the scan "done" → idle timer is kept in a ref and cleared when a new doSync starts and on unmount, so a quick rescan isn't reset to idle mid-scan.
 - [x] 2026-11-04 **PERF-8**: startup shows the library saved in the DB (`get_library_grouped`) before the scan, which then runs in the background behind the TopSyncBar. The full-screen overlay only appears when the DB is empty. A failed scan no longer blanks a cached library (rest of BUG-14 still open).
