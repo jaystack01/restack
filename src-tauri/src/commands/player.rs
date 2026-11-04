@@ -3,13 +3,14 @@ use crate::db::{
     update_progress,
 };
 use crate::models::AppState;
+use crate::run_blocking;
 use rusqlite::Connection;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::process::Command;
+use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager};
 
 /// Fraction of the duration after which an episode counts as watched.
 const WATCHED_THRESHOLD: f64 = 0.9;
@@ -25,10 +26,13 @@ struct ProgressPayload {
 }
 
 #[tauri::command]
-pub fn set_watched_cmd(app: AppHandle, media_ids: Vec<i64>, watched: bool) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    init_schema(&conn)?;
-    set_watched(&conn, &media_ids, watched)
+pub async fn set_watched_cmd(app: AppHandle, media_ids: Vec<i64>, watched: bool) -> Result<(), String> {
+    run_blocking(move || {
+        let conn = open_db(&app)?;
+        init_schema(&conn)?;
+        set_watched(&conn, &media_ids, watched)
+    })
+    .await
 }
 
 /// Once watched, stays watched (rewatching doesn't un-mark it).
@@ -77,12 +81,25 @@ fn persist_progress(app: &AppHandle, conn: Option<&Connection>, file_path: &str,
 }
 
 #[tauri::command]
-pub fn play_episode(
+pub async fn play_episode(
     app: AppHandle,
-    state: State<'_, AppState>,
     file_path: String,
     start_seconds: Option<u64>,
 ) -> Result<(), String> {
+    run_blocking(move || start_playback(app, file_path, start_seconds)).await
+}
+
+/// Kill a replaced mpv and reap it. Called outside the `player_process` lock.
+fn stop_player(old_process: Option<Child>) {
+    if let Some(mut old_process) = old_process {
+        println!("Killing previous mpv process...");
+        let _ = old_process.kill();
+        let _ = old_process.wait();
+    }
+}
+
+fn start_playback(app: AppHandle, file_path: String, start_seconds: Option<u64>) -> Result<(), String> {
+    let state = app.state::<AppState>();
     let conn = open_db(&app)?;
     init_schema(&conn)?;
 
@@ -106,20 +123,16 @@ pub fn play_episode(
         cmd.arg(format!("--start={}", start));
     }
 
-    if let Ok(mut process_lock) = state.player_process.lock() {
-        if let Some(mut old_process) = process_lock.take() {
-            println!("Killing previous mpv process...");
-            let _ = old_process.kill();
-            let _ = old_process.wait();
-        }
-    }
+    // Only swap the Child under the lock; kill/wait and spawn happen outside it
+    let old_process = state.player_process.lock().ok().and_then(|mut lock| lock.take());
+    stop_player(old_process);
 
     let child = cmd.spawn()
         .map_err(|e| format!("Failed to start mpv: {}", e))?;
 
-    if let Ok(mut process_lock) = state.player_process.lock() {
-        *process_lock = Some(child);
-    }
+    // A concurrent play_episode may have stored its mpv meanwhile: the newest wins
+    let raced = state.player_process.lock().ok().and_then(|mut lock| lock.replace(child));
+    stop_player(raced);
     
     // Notify frontend
     let _ = app.emit("video_playback_started", file_path.clone());

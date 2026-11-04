@@ -2,7 +2,8 @@ use crate::db::{
     get_full_library, get_media_paths, init_schema, open_db, sync_missing_media, upsert_episode, upsert_movie,
     upsert_other,
 };
-use crate::models::LibraryResponse;
+use crate::models::{AppState, LibraryResponse, ScanGuard};
+use crate::run_blocking;
 use crate::utils::parser::{parse_filename, ParsedMedia};
 use crate::utils::scanner::{
     collect_video_files, discover_default_scan_roots, ScanWalk, get_duration, is_confirmed_gone, reconcile_unseen,
@@ -12,7 +13,7 @@ use rusqlite::{Connection, Transaction};
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 
 #[derive(serde::Serialize, Clone)]
 struct ScanStartPayload {
@@ -27,6 +28,11 @@ struct ScanProgressPayload {
 }
 
 fn scan_roots_and_sync(app: &AppHandle, roots: &[String]) -> Result<LibraryResponse, String> {
+    // One scan at a time: a second caller (e.g. Ctrl+R during the startup scan)
+    // gets an error instead of queueing another full walk. Released on drop.
+    let state = app.state::<AppState>();
+    let _scan = ScanGuard::try_acquire(&state.scan_running)?;
+
     let start = std::time::Instant::now();
 
     let conn = open_db(app)?;
@@ -173,20 +179,26 @@ fn upsert_parsed(
 }
 
 #[tauri::command]
-pub fn scan_user_storage(app: AppHandle) -> Result<LibraryResponse, String> {
-    let roots = discover_default_scan_roots();
-    scan_roots_and_sync(&app, &roots)
+pub async fn scan_user_storage(app: AppHandle) -> Result<LibraryResponse, String> {
+    run_blocking(move || {
+        let roots = discover_default_scan_roots();
+        scan_roots_and_sync(&app, &roots)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn scan_and_sync(app: AppHandle, root_path: String) -> Result<LibraryResponse, String> {
-    let roots = vec![root_path];
-    scan_roots_and_sync(&app, &roots)
+pub async fn scan_and_sync(app: AppHandle, root_path: String) -> Result<LibraryResponse, String> {
+    run_blocking(move || {
+        let roots = vec![root_path];
+        scan_roots_and_sync(&app, &roots)
+    })
+    .await
 }
 
 #[tauri::command]
-pub fn get_scan_roots() -> Vec<String> {
-    discover_default_scan_roots()
+pub async fn get_scan_roots() -> Result<Vec<String>, String> {
+    run_blocking(|| Ok(discover_default_scan_roots())).await
 }
 
 #[cfg(test)]

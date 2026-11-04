@@ -1,9 +1,31 @@
 use serde::Serialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::process::Child;
 
 pub struct AppState {
     pub player_process: Mutex<Option<Child>>,
+    /// Set while a library scan runs; see `ScanGuard`.
+    pub scan_running: AtomicBool,
+}
+
+/// Holds the "scan running" flag; clears it on drop, so the flag is released on
+/// every exit path (Ok, Err via `?`, or a panic unwinding the scan).
+pub struct ScanGuard<'a>(&'a AtomicBool);
+
+impl<'a> ScanGuard<'a> {
+    /// Claim the flag, or fail if another scan holds it.
+    pub fn try_acquire(flag: &'a AtomicBool) -> Result<Self, String> {
+        flag.compare_exchange(false, true, Ordering::Acquire, Ordering::Relaxed)
+            .map(|_| ScanGuard(flag))
+            .map_err(|_| "A scan is already running".to_string())
+    }
+}
+
+impl Drop for ScanGuard<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Release);
+    }
 }
 
 #[derive(Serialize, Clone)]
@@ -111,4 +133,40 @@ pub struct LibraryResponse {
     pub series: Vec<ShowGroup>,
     pub movies: Vec<MovieItem>,
     pub others: Vec<OtherItem>,
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn scan_guard_is_exclusive_and_released_on_drop() {
+        let flag = AtomicBool::new(false);
+        let guard = ScanGuard::try_acquire(&flag).unwrap();
+        assert_eq!(
+            ScanGuard::try_acquire(&flag).err().as_deref(),
+            Some("A scan is already running")
+        );
+        drop(guard);
+        assert!(!flag.load(Ordering::SeqCst));
+        assert!(ScanGuard::try_acquire(&flag).is_ok());
+    }
+
+    #[test]
+    fn scan_guard_released_on_error_and_panic() {
+        let flag = AtomicBool::new(false);
+        let failing_scan = || -> Result<(), String> {
+            let _guard = ScanGuard::try_acquire(&flag)?;
+            Err("Failed to scan: boom".to_string())
+        };
+        assert!(failing_scan().is_err());
+        assert!(!flag.load(Ordering::SeqCst));
+
+        let panicked = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = ScanGuard::try_acquire(&flag).unwrap();
+            panic!("scan panicked");
+        }));
+        assert!(panicked.is_err());
+        assert!(!flag.load(Ordering::SeqCst));
+    }
 }

@@ -19,7 +19,7 @@ _Nothing picked yet. Move items here when you start them._
 
 1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
-3. **Make it responsive**: PERF-1, ~~PERF-6~~, ~~PERF-7~~, ~~PERF-8~~ (PERF-6, PERF-7 and PERF-8 done 2026-11-04).
+3. ~~**Make it responsive**: PERF-1, PERF-6, PERF-7, PERF-8~~ (done 2026-11-04).
 4. **Safety net before refactors**: ~~CHORE-1~~ (done 2026-11-04), ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
 
@@ -33,12 +33,12 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Move `sync_library` + `upsert_parsed` to a `services/scan.rs` when a second caller appears (e.g. FEAT-2 file watching). Low urgency now.
 
 - [ ] **ARCH-2 · Medium · Confirmed** — `player.rs` mixes four concerns in one deeply nested loop.
-  - **Location:** `src-tauri/src/commands/player.rs:138-271` (`track_progress`; IPC loop about 190-245)
+  - **Location:** `src-tauri/src/commands/player.rs:151-284` (`track_progress`; IPC loop about 203-258)
   - **Problem:** Process lifecycle, mpv JSON-IPC protocol parsing, DB writes, and event emission are interleaved six levels deep. The watched/resume rules and the throttle decision are already pure fns (`is_watched`, `resume_position`, `should_persist`, tested), but the loop glue and the `eof → next` ordering are still untested and live in one block.
   - **Solution:** Extract `fn parse_ipc_line(&str) -> Option<IpcEvent>` (pure, testable) and a small `ProgressTracker` struct that owns the `current`/`persisted`/`persisted_at` state now held as locals in `track_progress` (calling `should_persist` and the watched latch), and keep the thread loop as glue. Preserve the "emit `play_next_episode` after the loop exits" invariant.
 
 - [ ] **ARCH-3 · Medium · Improvement** — Media identity is the file path.
-  - **Location:** `src-tauri/src/db.rs:42-56` (`file_path TEXT UNIQUE`), `commands/scanner.rs:161-173` (`upsert_parsed`)
+  - **Location:** `src-tauri/src/db.rs:42-56` (`file_path TEXT UNIQUE`), `commands/scanner.rs:166-178` (`upsert_parsed`)
   - **Problem:** Renaming or moving a file (e.g. tidying `~/Downloads` into `~/Videos/Show/`) is seen as delete + new file. Progress, watched state, `user_pinned`, and group assignment are lost, and ffprobe/ffmpeg rerun.
   - **Solution:** During a scan, before hard-deleting a missing row, try to match a new file by `(size, mtime)` or `(dev, inode)`. Store these in new additive columns. If matched, `UPDATE media SET file_path = new` instead of delete + insert.
 
@@ -54,12 +54,12 @@ _Nothing picked yet. Move items here when you start them._
 
 
 - [ ] **ARCH-7 · Low · Confirmed** — Stringly-typed media types across the boundary.
-  - **Location:** `src-tauri/src/db.rs:483-530` (`reclassify_media(target_type: &str)`), `models.rs:73-82` (`ContinueWatchingItem.mode`, `up_next_type`)
+  - **Location:** `src-tauri/src/db.rs:483-530` (`reclassify_media(target_type: &str)`), `models.rs:95-104` (`ContinueWatchingItem.mode`, `up_next_type`)
   - **Problem:** An unknown `target_type` is silently a no-op that returns `Ok(())`. Typos in JS can't be caught.
   - **Solution:** Use `#[derive(Deserialize)] #[serde(rename_all = "lowercase")] enum MediaType { Series, Movie, Other }` for the command arg, and serialize enums for `mode`/`upNextType`.
 
 - [ ] **ARCH-8 · Low · Improvement** — Mobile/Windows template scaffolding in a Linux-only app.
-  - **Location:** `src-tauri/src/main.rs:2` (`windows_subsystem`), `src-tauri/src/lib.rs:17` (`mobile_entry_point`), `src-tauri/Cargo.toml:15` (`staticlib`, `cdylib`), `tauri.conf.json:33-40` (`.icns`, `.ico`)
+  - **Location:** `src-tauri/src/main.rs:2` (`windows_subsystem`), `src-tauri/src/lib.rs:31` (`mobile_entry_point`), `src-tauri/Cargo.toml:15` (`staticlib`, `cdylib`), `tauri.conf.json:33-40` (`.icns`, `.ico`)
   - **Problem:** These contradict the "Linux only, no Windows/macOS branches" rule and add build output for nothing.
   - **Solution:** Drop `staticlib`/`cdylib` (keep `rlib` + bin), remove the cfg attrs, and trim the bundle icons to PNG sizes.
 
@@ -76,7 +76,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Propagate errors with `?` and `format!("Failed to …: {e}")`. Use `.optional()` (rusqlite `OptionalExtension`) for "no row" instead of catch-all `Err(_)`.
 
 - [ ] **DES-3 · Low · Confirmed** — Error-message style is inconsistent with the project convention.
-  - **Location:** `commands/player.rs:74`, `utils/scanner.rs:23,30`, `utils/thumbnail.rs:10,12` (`format!("…{}", e)`)
+  - **Location:** `commands/player.rs:131`, `utils/scanner.rs:23,30`, `utils/thumbnail.rs:10,12` (`format!("…{}", e)`)
   - **Problem:** CLAUDE.md requires `format!("Failed to …: {e}")`. Bare `e.to_string()` gives the user/log no context.
   - **Solution:** Normalize these when touching the files.
 
@@ -130,12 +130,12 @@ _Nothing picked yet. Move items here when you start them._
   - **Test:** `db::tests::merge_then_rescan_does_not_split` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **BUG-14 · Medium · Confirmed** — One bad file aborts the whole scan, silently.
-  - **Location:** `src/App.jsx:50-54`, `src-tauri/src/commands/scanner.rs:161-167` (`upsert_parsed`)
+  - **Location:** `src/App.jsx:50-54`, `src-tauri/src/commands/scanner.rs:166-172` (`upsert_parsed`)
   - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch. Since PERF-7 a failing upsert rolls back only the current uncommitted batch (up to 500 rows); earlier batches stay committed, and the scan still aborts.
   - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
 
 - [ ] **BUG-19 · Medium · Confirmed** — Thumbnails are never generated for clips shorter than 15 s, and never retried.
-  - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:60-66` (probe closure, only for `is_new`), `:92-95` (commit + `on_file` call)
+  - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:65-71` (probe closure, only for `is_new`), `:97-100` (commit + `on_file` call)
   - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
   - **Solution:** Seek to `min(15, duration * 0.1)` (duration is known first). Regenerate when `thumbnail_path IS NULL`, the file at `thumbnail_path` no longer exists, or `duration = 0`, not only for new files.
 
@@ -173,7 +173,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Refetch on `video_playback_stopped` / library changes (subscribe), and add error handling.
 
 - [ ] **BUG-28 · Low · Confirmed** — A stale stop event clears "Playing" when the same file is replayed.
-  - **Location:** `src/App.jsx:144-148`, `src-tauri/src/commands/player.rs:65-71,189`
+  - **Location:** `src/App.jsx:144-148`, `src-tauri/src/commands/player.rs:138,279` (started/stopped emits)
   - **Problem:** Replaying the same file kills the old mpv. The old tracker's `video_playback_stopped(path)` arrives after the new `video_playback_started(path)`, and the path compare passes, so the UI shows nothing playing.
   - **Solution:** Include a playback session id (the socket uuid) in the start/stop payloads and compare that.
 
@@ -186,13 +186,13 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Use `season IS NULL`-style sentinel logic (or check `media_type != 'series'`) instead of `season == 0`. Detect collisions and append. Return an error on an unknown type (ARCH-7).
 
 - [ ] **BUG-30 · Low · Confirmed** — mpv is never reaped after it exits on its own.
-  - **Location:** `src-tauri/src/commands/player.rs:76-78`, `models.rs:5-7`
+  - **Location:** `src-tauri/src/commands/player.rs:134-136` (`start_playback` stores the `Child`), `models.rs:6-10`
   - **Problem:** The `Child` stays in `AppState` until the next `play_episode`, so a zombie `mpv` process lingers.
   - **Solution:** Have the tracker thread `try_wait()`/`wait()` and clear `AppState.player_process` when the IPC loop ends (pass the `AppHandle` and use `app.state::<AppState>()`).
 
 - [ ] **BUG-31 · Low · Potential** — Progress tracking silently gives up on slow mpv startup.
-  - **Location:** `src-tauri/src/commands/player.rs:98-111`
-  - **Problem:** It waits at most 3 s for the socket. On a cold network/USB mount mpv can take longer, so playback works but no progress is saved, with no signal to the user. A `expect()` on `try_clone` at `:121` can also panic the thread.
+  - **Location:** `src-tauri/src/commands/player.rs:154-168`
+  - **Problem:** It waits at most 3 s for the socket. On a cold network/USB mount mpv can take longer, so playback works but no progress is saved, with no signal to the user. A `expect()` on `try_clone` at `:191` can also panic the thread.
   - **Solution:** Retry `connect` until the child exits (check `try_wait`) rather than a fixed count. Replace `expect` with an early return and a log.
 
 - [ ] **BUG-32 · Low · Confirmed** — Latent runtime error in `MergeGroupModal`.
@@ -214,9 +214,10 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Purge `deleted_at` rows when their item is no longer in the Trash (`trash::os_limited::list`) or after N days. Offer a "Missing files" view (or a setting) to forget `missing_since` rows, and/or auto-purge after N days once FEAT-1 adds settings.
 
 - [ ] **BUG-37 · Low · Potential** — An old tracker's final flush can move Continue Watching back to the previous episode.
-  - **Location:** `src-tauri/src/commands/player.rs` `track_progress` (final flush after the IPC loop) and `play_episode` (kills the old mpv)
+  - **Location:** `src-tauri/src/commands/player.rs` `track_progress` (final flush after the IPC loop) and `start_playback` (kills the old mpv, outside the `player_process` lock since PERF-1)
   - **Problem:** Starting a different episode kills the old mpv; the old tracker's final flush calls `update_progress`, which also sets `app_state.last_watched_episode_id`. If that flush lands after the new tracker's first write, Continue Watching points at the old episode. The new tracker polls for its socket in 200 ms steps, so the old flush almost always lands first.
-  - **Solution:** Have the final flush skip the pointer update when the tracker was superseded (e.g. a playback generation counter in `AppState`), or only set the pointer from the most recently started playback.
+  - **Related (since PERF-1):** the kill and spawn now happen outside the `player_process` lock. Two near-simultaneous `play_episode` calls keep the newest mpv and reap the loser, but their `video_playback_started` events can reach the frontend out of order.
+  - **Solution:** Have the final flush skip the pointer update when the tracker was superseded (e.g. a playback generation counter in `AppState`, which could also tag the start/stop events), or only set the pointer from the most recently started playback.
 
 - [ ] **BUG-39 · Low · Improvement** — Show names that really end in a year lose it.
   - **Location:** `src-tauri/src/utils/parser.rs` `series_show_name` / `SHOW_YEAR_RE`
@@ -234,12 +235,12 @@ _Nothing picked yet. Move items here when you start them._
 
 
 - [ ] **SEC-4 · Medium · Potential** — Destructive commands trust arbitrary paths from the webview.
-  - **Location:** `src-tauri/src/commands/library.rs` (`delete_episodes_cmd`, `restore_episodes_cmd`), `commands/player.rs:36-92` (`play_episode`)
+  - **Location:** `src-tauri/src/commands/library.rs` (`delete_episodes_cmd`, `restore_episodes_cmd`), `commands/player.rs:84-149` (`play_episode` / `start_playback`)
   - **Problem:** Any string sent from JS is trashed or handed to `mpv` as an argument. The CSP is strict and there's no remote content, so exploitation needs an XSS first. But this is the app's only file-destroying path and it does no validation.
   - **Solution:** Have the commands accept `media_ids`, resolve paths from the DB, and refuse paths not in `media`. For mpv, pass `--` before the file argument so a path can never be parsed as an option.
 
 - [ ] **SEC-5 · Low · Confirmed** — The mpv IPC socket is in world-readable `/tmp`.
-  - **Location:** `src-tauri/src/commands/player.rs:50`
+  - **Location:** `src-tauri/src/commands/player.rs:111`
   - **Problem:** Other local users can see the socket name. mpv creates it with the default umask, so they could connect and send commands to mpv (which can run `run` subprocess commands).
   - **Solution:** Use `$XDG_RUNTIME_DIR` (per-user, mode 0700), falling back to `/tmp`.
 
@@ -249,21 +250,16 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Use `"$APPDATA/thumbnails/**"` (a Tauri path variable).
 
 - [ ] **SEC-7 · Low · Confirmed** — Unused plugin permissions are granted.
-  - **Location:** `src-tauri/capabilities/default.json:6-10` (`opener:default`, `dialog:default`), `src-tauri/src/lib.rs:20-21`
+  - **Location:** `src-tauri/capabilities/default.json:6-10` (`opener:default`, `dialog:default`), `src-tauri/src/lib.rs:34-35`
   - **Problem:** Neither plugin is used by any frontend code. They widen the IPC surface for nothing.
   - **Solution:** Remove them (see DEP-2) until FEAT-1 needs the dialog.
 
 - [ ] **SEC-8 · Low · Potential** — Non-UTF-8 paths are stored lossily.
-  - **Location:** `src-tauri/src/utils/scanner.rs` (`collect_video_files`, where stored paths are built), `commands/scanner.rs:47-49` (progress file name, `to_string_lossy`)
+  - **Location:** `src-tauri/src/utils/scanner.rs` (`collect_video_files`, where stored paths are built), `commands/scanner.rs:52-54` (progress file name, `to_string_lossy`)
   - **Problem:** A filename with invalid UTF-8 is stored with U+FFFD. mpv, trash, and restore then target a path that doesn't exist.
   - **Solution:** Skip and log such files (simplest), or store paths as BLOB/`OsString` bytes.
 
 ## ⚡ Performance
-
-- [ ] **PERF-1 · High · Confirmed** — All Tauri commands are sync `fn`, so they run on the main thread.
-  - **Location:** every `#[tauri::command]` in `src-tauri/src/commands/*.rs`
-  - **Problem:** A long `scan_user_storage` (ffprobe + ffmpeg per new file) can freeze the window. Potential knock-on: WebKitGTK needs the main loop to deliver `emit()`s, so the live scan-progress UI may not repaint until the scan returns. Verify on a large library.
-  - **Solution:** Make scan/thumbnail commands `async` or use `tauri::async_runtime::spawn_blocking`.
 
 - [ ] **PERF-2 · Medium · Confirmed** — The default scan walks **all of `$HOME`**.
   - **Location:** `src-tauri/src/utils/scanner.rs:53-80`
@@ -271,7 +267,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** User-configurable scan roots (FEAT-1). Until then consider `~/Videos`, `~/Downloads`, `~/Movies`, and skip hidden dirs (BUG-20).
 
 - [ ] **PERF-3 · Medium · Improvement** — Thumbnail and duration generation is serial.
-  - **Location:** `src-tauri/src/commands/scanner.rs:61-66` (probe closure)
+  - **Location:** `src-tauri/src/commands/scanner.rs:66-71` (probe closure)
   - **Solution:** Parallelise with a bounded worker pool, or generate thumbnails in the background after the library is shown.
 
 - [ ] **PERF-4 · Low · Improvement** — Every command reopens the SQLite connection and re-runs `init_schema` (about 6 statements plus `PRAGMA table_info`).
@@ -286,7 +282,7 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **PERF-10 · Medium · Confirmed** — ffprobe/ffmpeg have no timeout.
   - **Location:** `src-tauri/src/utils/scanner.rs:15-23`, `utils/thumbnail.rs:29-41`
-  - **Problem:** A truncated file or a hung network mount stalls the scan forever, and with PERF-1 it also freezes the app.
+  - **Problem:** A truncated file or a hung network mount stalls the scan forever. Since PERF-1 the window stays responsive, but the scan never finishes and holds the scan guard, so every later scan and every delete/restore fails with "a scan is running" until restart.
   - **Solution:** Spawn with `wait_timeout` (the `wait-timeout` crate), or pass ffmpeg `-rw_timeout` plus kill-after-N-seconds logic.
 
 - [ ] **PERF-11 · Low · Confirmed** — Episode grid/list work is quadratic and memo is defeated.
@@ -294,24 +290,29 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Compute drag ids lazily inside `onDragStart`. Wrap the handlers in `useCallback`, and make `bindEpisodeRef` stable (a single ref callback reading `data-id`).
 
 - [ ] **PERF-12 · Low · Improvement** — One `scan:progress` IPC event and one React state update per file.
-  - **Location:** `src-tauri/src/commands/scanner.rs:45-59`, `src/App.jsx:104-112`
+  - **Location:** `src-tauri/src/commands/scanner.rs:50-64`, `src/App.jsx:104-112`
   - **Solution:** Throttle to about 10 events/s (time-based) and always send the final one.
 
 - [ ] **PERF-14 · Low · Confirmed** — Orphaned thumbnails are never removed.
-  - **Location:** `src-tauri/src/commands/scanner.rs:106-108` → `db::sync_missing_media` (row deleted, jpg kept)
+  - **Location:** `src-tauri/src/commands/scanner.rs:111-113` → `db::sync_missing_media` (row deleted, jpg kept)
   - **Problem:** Evidence: the local thumbnails dir has 48 files while 2 rows reference a thumbnail.
   - **Solution:** Delete the jpg when its row is purged, and/or sweep files not referenced by any row at the end of a scan.
 
-- [ ] **PERF-15 · Low · Potential** — App connections rely on the implicit busy timeout and the rollback journal.
-  - **Location:** `src-tauri/src/db.rs:18-21` (`open_db`); `src-tauri/src/commands/player.rs` `track_progress`
-  - **Problem:** The scanner and the mpv tracker write through separate connections in the default rollback-journal mode. Since PERF-7 scans hold short write transactions (at most 500 rows or 1 s, committed before every probe). Only rusqlite's implicit 5 s default busy timeout stops a progress write from failing with `SQLITE_BUSY` while a batch commits; nothing in the code states that. Readers (`get_library_grouped` during a scan) also block on the writer, and each batch commit pays a full rollback-journal fsync.
+- [ ] **PERF-15 · Medium · Potential** — App connections rely on the implicit busy timeout and the rollback journal.
+  - **Location:** `src-tauri/src/db.rs:18-21` (`open_db`); `src-tauri/src/commands/player.rs` `track_progress`; every command in `src-tauri/src/commands/*.rs` (on the blocking pool since PERF-1)
+  - **Problem:** The scanner and the mpv tracker write through separate connections in the default rollback-journal mode. Since PERF-7 scans hold short write transactions (at most 500 rows or 1 s, committed before every probe). Only rusqlite's implicit 5 s default busy timeout stops a progress write from failing with `SQLITE_BUSY` while a batch commits; nothing in the code states that. Readers (`get_library_grouped` during a scan) also block on the writer, and each batch commit pays a full rollback-journal fsync. Since PERF-1, UI commands (rename, merge, move, set watched, reclassify, `get_library_grouped`) run at the same time as a scan instead of queueing behind it on the main thread, so each one also depends on that 5 s timeout while a batch (up to 1 s or 500 rows) is open. Delete/restore are excluded: they are mutually exclusive with scans.
   - **Solution:** In `open_db`, set an explicit `busy_timeout` and `PRAGMA journal_mode=WAL` (see PERF-4). Verify with existing user DBs.
+
+- [ ] **PERF-16 · Low · Potential** — Concurrent scans and Trash operations are rejected, not queued.
+  - **Location:** `src-tauri/src/models.rs` `ScanGuard`, `src-tauri/src/commands/scanner.rs` `scan_roots_and_sync`, `src-tauri/src/commands/library.rs` `exclusive_with_scan`; `src/pages/SeriesDetail.jsx` (delete/Undo error handling)
+  - **Problem:** A `scan_and_sync(root)` requested during a full scan fails with "A scan is already running". So does a scan that starts while a delete/restore batch runs, where that message is misleading. Delete/Undo during a scan fail with "Failed to delete/restore: a library scan is running". SeriesDetail shows only its generic "Failed to delete/restore episodes." message, and the 10 s Undo banner can expire during a long scan, leaving the files only in the system Trash. Before PERF-1 these calls waited and ran after the scan. Two concurrent delete/restore batches also exclude each other through the same guard, which the name doesn't suggest. No frontend calls `scan_and_sync` yet, and App.jsx already dedupes `scan_user_storage` via `isSyncingRef`.
+  - **Solution:** Give the guard a wait/queue mode (or a separate lock with a timeout) so short Trash batches wait for the scan, or have the scan skip rows soft-deleted at write time (upsert `WHERE deleted_at IS NULL` on conflict in `db.rs`). At minimum, show the backend's error text, disable delete/Undo while a scan runs (or keep Undo open until it ends), and add a doc comment on `exclusive_with_scan` noting it also serialises Trash batches.
 
 ## 📦 Dependencies and Configuration
 
 
 - [ ] **DEP-2 · Low · Confirmed** — Unused plugins are shipped.
-  - **Location:** `package.json:15-16`, `src-tauri/Cargo.toml:22-23`, `lib.rs:20-21`, `capabilities/default.json`
+  - **Location:** `package.json:15-16`, `src-tauri/Cargo.toml:22-23`, `lib.rs:34-35`, `capabilities/default.json`
   - **Problem:** `@tauri-apps/plugin-dialog`/`plugin-opener` and the Rust crates are never used.
   - **Solution:** Remove them now and re-add the dialog when FEAT-1 is built.
 
@@ -356,7 +357,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 51 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
 
 
 
@@ -383,7 +384,7 @@ _Current state (2026-11-04): `cargo test` runs 51 backend tests (`db.rs`, `utils
   - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (after fixing BUG-13 and BUG-32), or delete the files and the unused commands. Update AGENT.md either way.
 
 - [ ] **MAINT-2 · Low · Confirmed** — Small dead code paths.
-  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:187-190` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:409` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
+  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:199-202` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:409` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
   - **Solution:** Remove these during the next touch of each file.
 
 - [ ] **MAINT-3 · Low · Confirmed** — SeriesDetail error banner is sticky and errors are generic.
@@ -407,7 +408,7 @@ _Current state (2026-11-04): `cargo test` runs 51 backend tests (`db.rs`, `utils
   - **Solution:** Cover install, runtime deps (`mpv`, `ffmpeg`, `ffprobe`), usage, and screenshots.
 
 - [ ] **CHORE-8 · Low · Improvement** — Replace `println!` debugging with proper logging.
-  - **Location:** `commands/player.rs:67,95,108,113,158,163,166,188`, `commands/scanner.rs:69`
+  - **Location:** `commands/player.rs:70,95,152,165,170,186,237,246,249,278`, `commands/scanner.rs:75`
   - **Solution:** Use `log` + `tauri-plugin-log`.
 
 - [ ] **CHORE-9 · Low · Confirmed** — Remove unused Vite template leftovers.
@@ -448,6 +449,7 @@ _Current state (2026-11-04): `cargo test` runs 51 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **PERF-1**: every Tauri command is now `async` and runs its existing sync body on the blocking pool (`run_blocking` in lib.rs: `spawn_blocking`, JoinError mapped to `Failed to run background task: …`). Scans are serialized by an RAII `ScanGuard` over `AppState.scan_running`; a second scan gets `Err("A scan is already running")` (tested: exclusive, released on Err and on panic). `delete_episodes_cmd`/`restore_episodes_cmd` take the same guard (`exclusive_with_scan` in commands/library.rs), so a Trash batch and a scan never overlap and a scan can't revive a trashed row (tested). `play_episode` no longer holds the player mutex across kill/wait/spawn; if two plays race, the newest mpv is kept. JS contract unchanged. Follow-ups: PERF-15, PERF-16.
 - [x] 2026-11-04 **BUG-38**: Dash episodes can have 4 digits except 19xx/20xx. `One_Piece_-_1071` is S1E1071, and `Show - 2019` is still Movie "Show" (2019).
 - [x] 2026-11-04 **BUG-18**: A parenthesised release year from the raw name is used first. Otherwise the last year-like number wins. `Blade Runner 2049 (2017)` and `The.Dark.Knight.(2008)` parse correctly.
 - [x] 2026-11-04 **BUG-17**: SxxExx accepts multi-episode tags (`S01E01E02` is episode 1) and `S01 E02`. Series show names drop a trailing 19xx/20xx year (`Doctor.Who.2005.S01E01` is "Doctor Who"); a name that is only a year (`1923`) keeps it. Unpinned rows regroup on the next rescan and leave their old yeared groups empty (see BUG-5).

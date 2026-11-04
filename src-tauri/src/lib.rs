@@ -12,8 +12,22 @@ use crate::commands::groups::{
     get_all_groups_cmd, get_merge_suggestions_cmd,
 };
 use crate::models::AppState;
+use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
 use tauri::Manager;
+
+/// Run a command body on Tauri's blocking thread pool. Sync commands run on the
+/// main thread, so DB, filesystem, Trash, and process work there freezes the window.
+pub(crate) async fn run_blocking<T, F>(f: F) -> Result<T, String>
+where
+    F: FnOnce() -> Result<T, String> + Send + 'static,
+    T: Send + 'static,
+{
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| format!("Failed to run background task: {e}"))?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -26,6 +40,7 @@ pub fn run() {
             
             app.manage(AppState {
                 player_process: Mutex::new(None),
+                scan_running: AtomicBool::new(false),
             });
             Ok(())
         })

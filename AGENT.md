@@ -30,7 +30,7 @@ cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dir
 cd src-tauri && cargo clippy   # lint backend
 ```
 
-- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
+- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
 - **No frontend tests, no ESLint/Prettier config, no CI.** Verify changes with `npm run build`, `cargo check`, and `cargo test`.
 
 ### Git workflow
@@ -133,8 +133,8 @@ src/
 
 src-tauri/src/
   main.rs                    calls restack_lib::run()
-  lib.rs                     Plugins, setup (open DB, init_schema, migrate_existing_groups), command registry
-  models.rs                  Serde structs returned to the frontend (camelCase)
+  lib.rs                     Plugins, setup (open DB, init_schema, migrate_existing_groups), command registry, `run_blocking`
+  models.rs                  Serde structs returned to the frontend (camelCase), `AppState`, `ScanGuard`
   db.rs                      ALL SQL: schema/migrations, upserts, queries, groups, progress, delete/restore
   commands/scanner.rs        scan_user_storage, scan_and_sync, get_scan_roots
   commands/library.rs        get_library_grouped, continue watching, delete/restore, reclassify
@@ -173,7 +173,7 @@ media (
 
 **Migrations** are additive and live in `init_schema()`: check `PRAGMA table_info(media)` and `ALTER TABLE ... ADD COLUMN` if missing. Follow that pattern; there is no migration framework and existing user DBs must keep working. Indexes on migrated columns (`idx_media_group_season_episode`, `idx_media_type_live`) must be created after the `ADD COLUMN` migrations in `init_schema()`, or older DBs fail to open.
 
-**Connection model**: every command calls `open_db(&app)` + `init_schema(&conn)` fresh. There is no pool or shared connection in `AppState` (which only holds the mpv `Child`). Keep that pattern unless you're deliberately refactoring it everywhere.
+**Connection model**: every command calls `open_db(&app)` + `init_schema(&conn)` fresh. There is no pool or shared connection in `AppState` (which holds the mpv `Child` and the `scan_running` flag). Keep that pattern unless you're deliberately refactoring it everywhere.
 
 **Errors**: all DB/command functions return `Result<T, String>` with `map_err(|e| format!("Failed to …: {e}"))`. Match that style.
 
@@ -199,6 +199,7 @@ media (
   - If the file's folder still exists and has other content, the file was really removed → **hard-delete**.
   - Otherwise (unmounted drive, offline NAS, removed folder) → set `missing_since`; the row is hidden but keeps progress/pinning. Upserts clear `missing_since` when the file reappears.
 - Every live-row query filters `deleted_at IS NULL AND missing_since IS NULL`.
+- Only one scan runs at a time. `scan_roots_and_sync` takes a `ScanGuard` (models.rs, RAII over `AppState.scan_running`), and a second `scan_user_storage`/`scan_and_sync` returns `Err("A scan is already running")` instead of waiting. The guard is released on every path, including errors and panics. Delete/restore hold the same flag, so a scan also fails with that error while a Trash batch runs (see PERF-16).
 - Returns the full `LibraryResponse`.
 
 ### Parsing (`utils/parser.rs`)
@@ -223,6 +224,7 @@ When adding a pattern, insert it at the right priority and think about false pos
 - On `end-file` with reason `eof` it looks up the next episode in the group and emits `play_next_episode` **after** the IPC loop closes. That ordering avoids a Broken-pipe race, so don't move it.
 - `update_progress` also sets `app_state.last_watched_episode_id` for **series** rows only, which drives Continue Watching. Manual mark watched/unwatched goes through `set_watched_cmd` (one transaction, position reset to 0) and never moves that pointer.
 - Auto-play next (`get_next_episode`) and Up Next skip trashed, missing, and non-series rows.
+- `play_episode` (body in `start_playback`) only swaps the `Child` while holding the `player_process` lock. Killing the old mpv and spawning the new one happen outside it, and if two plays race, the newest mpv is kept and the replaced one is killed.
 
 ### Thumbnails (`utils/thumbnail.rs`)
 
@@ -233,6 +235,7 @@ When adding a pattern, insert it at the right priority and think about false pos
 
 - `delete_episodes_cmd` moves each file to the freedesktop Trash (`utils/trash.rs`, `trash` crate), then sets `deleted_at` for that file (`db::mark_deleted`) before the next one, so a mid-batch failure leaves the DB consistent.
 - `restore_episodes_cmd` finds the most recent Trash item whose original path matches (`trash::os_limited::list`), restores it, then clears `deleted_at` (`db::mark_restored`), per file. This works for external drives (`$topdir/.Trash-$UID`), renamed duplicates, and `$XDG_DATA_HOME`.
+- Both commands run inside `exclusive_with_scan` (commands/library.rs), which holds the `ScanGuard` for the whole batch and fails with `Failed to delete|restore: a library scan is running` during a scan. Otherwise a scan that collected the path earlier would upsert the trashed row back to live (`deleted_at = NULL`), or hard-delete a just-restored one. Two delete/restore batches also exclude each other.
 
 ---
 
@@ -258,11 +261,11 @@ When adding a pattern, insert it at the right priority and think about false pos
 | `restore_episodes_cmd` | `{ filePaths }` | — |
 | `reclassify_media_cmd` | `{ mediaIds, targetType: 'series'\|'movie'\|'other', targetGroupId }` | — |
 
-Tauri maps camelCase JS args to snake_case Rust params. Return structs use `#[serde(rename_all = "camelCase")]`.
+Tauri maps camelCase JS args to snake_case Rust params. Return structs use `#[serde(rename_all = "camelCase")]`. All commands are `async` and return `Result` (§7.1); `delete_episodes_cmd`/`restore_episodes_cmd` return an error while a scan is running.
 
 `LibraryResponse = { series: ShowGroup[], movies: MovieItem[], others: OtherItem[] }`, `ShowGroup = { groupId, displayName, seasons: [{ season, episodes: Episode[] }] }`.
 
-**Adding a command** takes four steps: write the fn in `db.rs`, add the `#[tauri::command]` wrapper in `commands/*.rs`, import it and add it to `generate_handler![]` in `lib.rs`, then add any new return type to `models.rs` with camelCase serde.
+**Adding a command** takes four steps: write the fn in `db.rs`, add the `#[tauri::command]` wrapper in `commands/*.rs`, import it and add it to `generate_handler![]` in `lib.rs`, then add any new return type to `models.rs` with camelCase serde. The wrapper is an `async fn` that runs its body through `crate::run_blocking` (§7.1).
 
 ### Events (backend → frontend, all listened to in `App.jsx`)
 
@@ -299,7 +302,7 @@ Episode/movie/other cards set `dataTransfer` `text/plain` to `JSON.stringify({ m
 
 Check these before you assume a behaviour is intended. This list only covers sharp edges an agent must know. The full backlog of bugs and improvements lives in `TODO.md` (see §10).
 
-1. **Sync commands run on the main thread.** All commands are non-`async` `fn`. Tauri 2 runs those on the main thread, so a long `scan_user_storage` (ffprobe + ffmpeg per new file) can stall the app. Prefer `async` commands or `spawn_blocking` for heavy work.
+1. **Commands run on the blocking pool.** Every `#[tauri::command]` is `async fn` and runs its sync body through `crate::run_blocking` (lib.rs: `tauri::async_runtime::spawn_blocking`, JoinError mapped to `Failed to run background task: …`). New commands must follow this pattern, because a plain sync `fn` runs on the main thread and freezes the window. Commands take owned args and use `app.state::<AppState>()` inside the closure instead of a `State<'_>` parameter. As a result, UI commands can now run while a scan is open, and DB writes rely on the busy timeout (see PERF-15). Anything that changes `deleted_at` or moves files (delete/restore) must be exclusive with scans (see §4 Delete / restore).
 2. **Scanning all of `$HOME`** is slow on large homes. The narrower `Videos/Downloads/Movies` roots are commented out in `utils/scanner.rs`.
 3. **Missing vs soft-deleted rows**: a rescan never purges soft-deleted rows, and hides (rather than deletes) rows whose storage may be offline (`missing_since`). Neither kind is purged automatically yet (see BUG-35).
 4. `get_all_groups` / merge-suggestion counts include soft-deleted and missing rows, and empty groups are only garbage-collected by merge and by the one-time startup migration.
