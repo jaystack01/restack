@@ -14,10 +14,14 @@ static PUNCTUATION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[._-]+").expect("valid punctuation regex"));
 static SPACES_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("valid spaces regex"));
 
-// Movie with year: "Inception 2010", "The Dark Knight 2008"
+// Movie with year: "Inception 2010", "The Dark Knight 2008". Greedy, so the last
+// year-like token wins: "Blade Runner 2049 2017" is (Blade Runner 2049, 2017).
 static MOVIE_YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(.+?)\s+((?:19|20)\d{2})\b\s*(.*)$").expect("valid movie year regex")
+    Regex::new(r"^(.+)\s+((?:19|20)\d{2})\b").expect("valid movie year regex")
 });
+// Parenthesised release year, read before clean_text strips brackets: "Title (2017)"
+static PAREN_YEAR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(((?:19|20)\d{2})\)").expect("valid paren year regex"));
 
 // Standard series patterns with explicit season + episode, in priority order.
 // NxNN is bounded (season 1-2 digits, episode 1-3) so resolutions like 1920x1080 never match.
@@ -76,6 +80,15 @@ pub fn parse_filename(stem: &str) -> ParsedMedia {
     let cleaned = clean_text(stem);
     if cleaned.is_empty() || DATE_RE.is_match(stem) {
         return ParsedMedia::Other { raw_name: stem.to_string() };
+    }
+
+    // A parenthesised year is the release year; the title is everything before it
+    if let Some(caps) = PAREN_YEAR_RE.captures_iter(stem).last() {
+        let title = clean_text(&stem[..caps.get(0).map_or(0, |m| m.start())]);
+        let year: Option<u32> = caps.get(1).and_then(|m| m.as_str().parse().ok());
+        if !title.is_empty() {
+            return ParsedMedia::Movie { title, year };
+        }
     }
 
     // Movie with year: "Inception 2010", "The Dark Knight 2008"
@@ -333,11 +346,17 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG-18: movie year takes the first year-like number"]
     fn bug18_movie_year_prefers_release_year() {
         check(&[
             ("Blade Runner 2049 (2017)", movie("Blade Runner 2049", 2017)),
             ("Blade.Runner.2049.2017.1080p", movie("Blade Runner 2049", 2017)),
+            ("The.Dark.Knight.(2008)", movie("The Dark Knight", 2008)),
+            ("[Grp] 2001 A Space Odyssey (1968) [1080p]", movie("2001 A Space Odyssey", 1968)),
+            ("2001.A.Space.Odyssey.1968.REMUX", movie("2001 A Space Odyssey", 1968)),
+            // No release year: the title's own year is still the best guess, as before.
+            ("Blade.Runner.2049.1080p", movie("Blade Runner", 2049)),
+            // A leading parenthesised year has no title before it, so the plain scan decides.
+            ("(2008) Some Clip", other("(2008) Some Clip")),
         ]);
     }
 }

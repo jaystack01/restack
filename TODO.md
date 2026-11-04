@@ -134,11 +134,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch. Since PERF-7 a failing upsert rolls back only the current uncommitted batch (up to 500 rows); earlier batches stay committed, and the scan still aborts.
   - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
 
-- [ ] **BUG-18 · Low · Confirmed** — Movie year picks the first year-like number.
-  - **Location:** `src-tauri/src/utils/parser.rs:18-20` (`MOVIE_YEAR_RE`), `:71`
-  - **Problem:** `Blade Runner 2049 (2017)` becomes title "Blade Runner", year 2049. The real year was in parentheses, which `clean_text` strips first. For the same reason `The.Dark.Knight.(2008)` (year only in parentheses) becomes **Other**; the parenthesised-year fix below covers it, so add that case to `bug18_movie_year_prefers_release_year` when fixing.
-  - **Solution:** Extract a parenthesised `(19|20)\d{2}` before bracket stripping and prefer it. Otherwise use the **last** year-like token.
-
 - [ ] **BUG-19 · Medium · Confirmed** — Thumbnails are never generated for clips shorter than 15 s, and never retried.
   - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:60-66` (probe closure, only for `is_new`), `:92-95` (commit + `on_file` call)
   - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
@@ -361,7 +356,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 49 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 2 `#[ignore]`d tests that reproduce open bugs BUG-13 and BUG-18. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 50 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
 
 
 
@@ -453,6 +448,7 @@ _Current state (2026-11-04): `cargo test` runs 49 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **BUG-18**: A parenthesised release year from the raw name is used first. Otherwise the last year-like number wins. `Blade Runner 2049 (2017)` and `The.Dark.Knight.(2008)` parse correctly.
 - [x] 2026-11-04 **BUG-17**: SxxExx accepts multi-episode tags (`S01E01E02` is episode 1) and `S01 E02`. Series show names drop a trailing 19xx/20xx year (`Doctor.Who.2005.S01E01` is "Doctor Who"); a name that is only a year (`1923`) keeps it. Unpinned rows regroup on the next rescan and leave their old yeared groups empty (see BUG-5).
 - [x] 2026-11-04 **BUG-16**: The dash-episode pattern needs a space or a non-digit before the dash, and an ISO date in the name turns off the dash fallback. Date-stamped recordings (Screencast/OBS) now stay Other instead of becoming a series or a Movie titled by their prefix.
 - [x] 2026-11-04 **BUG-15**: NxNN is now bounded to a 1-2 digit season and 1-3 digit episode at a word boundary, and `clean_text` strips WxH resolution tags. `Inception.2010.1920x1080` is now Movie "Inception" (2010).
