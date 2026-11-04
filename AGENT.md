@@ -130,7 +130,7 @@ media (
 )
 ```
 
-**Migrations** are additive and live in `init_schema()`: check `PRAGMA table_info(media)` and `ALTER TABLE ... ADD COLUMN` if missing. Follow that pattern; there is no migration framework and existing user DBs must keep working.
+**Migrations** are additive and live in `init_schema()`: check `PRAGMA table_info(media)` and `ALTER TABLE ... ADD COLUMN` if missing. Follow that pattern; there is no migration framework and existing user DBs must keep working. Indexes on migrated columns (`idx_media_group_season_episode`, `idx_media_type_live`) must be created after the `ADD COLUMN` migrations in `init_schema()`, or older DBs fail to open.
 
 **Connection model**: every command calls `open_db(&app)` + `init_schema(&conn)` fresh. There is no pool or shared connection in `AppState` (which only holds the mpv `Child`). Keep that pattern unless you're deliberately refactoring it everywhere.
 

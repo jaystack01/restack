@@ -109,6 +109,13 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to create group index: {e}"))?;
 
+    // Live-row filter used by every library query (`media_type = ? AND deleted_at IS NULL
+    // AND missing_since IS NULL`); also after the migrations, since all three are added columns
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_media_type_live ON media(media_type, deleted_at, missing_since);",
+    )
+    .map_err(|e| format!("Failed to create media type index: {e}"))?;
+
     Ok(())
 }
 
@@ -1147,6 +1154,53 @@ mod tests {
         assert!(row::<Option<i64>>(&conn, "/v/old.s01e01.mkv", "missing_since").is_none());
         assert!(row::<Option<i64>>(&conn, "/v/old.s01e01.mkv", "group_id").is_some());
         assert_eq!(library_paths(&conn), vec!["/v/old.s01e01.mkv"]);
+    }
+
+    fn index_exists(conn: &Connection, name: &str) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1)",
+            params![name],
+            |r| r.get(0),
+        )
+        .expect("sqlite_master")
+    }
+
+    #[test]
+    fn live_row_index_is_created_on_old_database_and_used() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Pre-`deleted_at`/`media_type`/`missing_since` schema
+        conn.execute_batch(
+            "CREATE TABLE media (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL UNIQUE,
+                show_name TEXT NOT NULL,
+                season INTEGER NOT NULL,
+                episode INTEGER NOT NULL,
+                title TEXT,
+                duration INTEGER NOT NULL DEFAULT 0,
+                last_position INTEGER NOT NULL DEFAULT 0,
+                watched INTEGER NOT NULL DEFAULT 0,
+                thumbnail_path TEXT
+            );",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+        assert!(index_exists(&conn, "idx_media_type_live"));
+        init_schema(&conn).unwrap(); // idempotent
+        assert!(index_exists(&conn, "idx_media_type_live"));
+
+        let plan: Vec<String> = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT id FROM media
+                 WHERE media_type = 'movie' AND deleted_at IS NULL AND missing_since IS NULL",
+            )
+            .unwrap()
+            .query_map([], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(plan.iter().any(|d| d.contains("idx_media_type_live")), "plan: {plan:?}");
     }
 
     #[test]

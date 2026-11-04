@@ -43,7 +43,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** During a scan, before hard-deleting a missing row, try to match a new file by `(size, mtime)` or `(dev, inode)`. Store these in new additive columns. If matched, `UPDATE media SET file_path = new` instead of delete + insert.
 
 - [ ] **ARCH-4 · Medium · Improvement** — Group identity has no alias concept, so merges and moves don't steer future scans.
-  - **Location:** `src-tauri/src/db.rs:120-141` (`find_or_create_group`), `:443-461` (`merge_groups`)
+  - **Location:** `src-tauri/src/db.rs:127-148` (`find_or_create_group`), `:450-468` (`merge_groups`)
   - **Problem:** Groups are keyed only by `normalized_name`. After a merge, the source name is gone, so the next file with that name creates a fresh group (see BUG-13). The same goes for any show whose release names vary ("Show 2005" vs "Show", BUG-17).
   - **Solution:** Add an additive `show_group_aliases(normalized_name TEXT PRIMARY KEY, group_id INTEGER)` table. `find_or_create_group` checks aliases first. `merge_groups` inserts the source's normalized name as an alias of the target.
 
@@ -54,7 +54,7 @@ _Nothing picked yet. Move items here when you start them._
 
 
 - [ ] **ARCH-7 · Low · Confirmed** — Stringly-typed media types across the boundary.
-  - **Location:** `src-tauri/src/db.rs:476-523` (`reclassify_media(target_type: &str)`), `models.rs:73-82` (`ContinueWatchingItem.mode`, `up_next_type`)
+  - **Location:** `src-tauri/src/db.rs:483-530` (`reclassify_media(target_type: &str)`), `models.rs:73-82` (`ContinueWatchingItem.mode`, `up_next_type`)
   - **Problem:** An unknown `target_type` is silently a no-op that returns `Ok(())`. Typos in JS can't be caught.
   - **Solution:** Use `#[derive(Deserialize)] #[serde(rename_all = "lowercase")] enum MediaType { Series, Movie, Other }` for the command arg, and serialize enums for `mode`/`upNextType`.
 
@@ -71,7 +71,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Take `&mut Connection`, use `let tx = conn.transaction()?; …; tx.commit()?`. Use `UPDATE … WHERE id IN (…)` for the id loops.
 
 - [ ] **DES-2 · Low · Confirmed** — Errors are silently swallowed or dropped in the DB layer.
-  - **Location:** `src-tauri/src/db.rs:423,452` (`filter_map(|r| r.ok())` drops movie/other rows), `:533,541` (`unwrap_or((1,0))`, `unwrap_or(0)`), `get_episode_meta` / `get_next_episode` (`.ok()?` everywhere). (`get_last_position` was replaced by `get_playback_state`, which uses `.optional()`.)
+  - **Location:** `src-tauri/src/db.rs:430,459` (`filter_map(|r| r.ok())` drops movie/other rows), `:540,548` (`unwrap_or((1,0))`, `unwrap_or(0)`), `get_episode_meta` / `get_next_episode` (`.ok()?` everywhere). (`get_last_position` was replaced by `get_playback_state`, which uses `.optional()`.)
   - **Problem:** A bad row disappears from the library without a trace. A DB lock or error during reclassify silently numbers the episode as S01E01.
   - **Solution:** Propagate errors with `?` and `format!("Failed to …: {e}")`. Use `.optional()` (rusqlite `OptionalExtension`) for "no row" instead of catch-all `Err(_)`.
 
@@ -81,7 +81,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Normalize these when touching the files.
 
 - [ ] **DES-4 · Low · Confirmed** — Three near-duplicate upserts and hand-rolled row tuples.
-  - **Location:** `src-tauri/src/db.rs:174-273` (`upsert_episode/movie/other`), `:303-325`, `:719-794` (10- and 8-element tuples)
+  - **Location:** `src-tauri/src/db.rs:181-280` (`upsert_episode/movie/other`), `:310-332`, `:726-801` (10- and 8-element tuples)
   - **Problem:** The `user_pinned` / `COALESCE` / `CASE` invariants are repeated three times and must be kept in sync. Positional tuples are easy to misorder.
   - **Solution:** Use one `upsert_media(conn, path, MediaKind, duration, thumb)` with a shared `ON CONFLICT` clause. Add `fn episode_from_row(&Row)` helpers.
 
@@ -124,7 +124,7 @@ _Nothing picked yet. Move items here when you start them._
 
 
 - [ ] **BUG-13 · Medium · Confirmed (latent: merge UI is unreachable, see MAINT-1)** — Merged groups resurrect and split new episodes.
-  - **Location:** `src-tauri/src/db.rs:181` (`find_or_create_group` runs unconditionally before upsert), `:194-198`, `:443-461`
+  - **Location:** `src-tauri/src/db.rs:188` (`find_or_create_group` runs unconditionally before upsert), `:201-205`, `:450-468`
   - **Problem:** After merging A into B, group A is deleted. The next scan recreates A for every A-named file (an empty group, re-suggested for merge). Any **newly downloaded** A episode gets `group_id = A`, splitting the show again.
   - **Solution:** ARCH-4 (aliases). Also only call `find_or_create_group` when the row is new or `group_id IS NULL`.
   - **Test:** `db::tests::merge_then_rescan_does_not_split` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
@@ -204,7 +204,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Include a playback session id (the socket uuid) in the start/stop payloads and compare that.
 
 - [ ] **BUG-29 · Low · Confirmed** — Reclassify-to-series edge cases.
-  - **Location:** `src-tauri/src/db.rs:490-519`
+  - **Location:** `src-tauri/src/db.rs:497-526`
   - **Problem:**
     1. Season-0 specials (`S00E01`) are treated as "unnumbered" and renumbered to S01E(max+1).
     2. Moving S01E03 into a group that already has S01E03 creates duplicate episode numbers with undefined order and auto-play next.
@@ -295,7 +295,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Hold one `Mutex<Connection>` in `AppState`. Run schema init once at startup. Enable `PRAGMA journal_mode=WAL` (currently `delete`) so the player thread doesn't contend with scans.
 
 - [ ] **PERF-5 · Low · Improvement** — Merge suggestions are O(n²) Levenshtein over all groups.
-  - **Location:** `src-tauri/src/db.rs:582-599`
+  - **Location:** `src-tauri/src/db.rs:589-606`
   - **Problem:** Fine for now; revisit with large libraries. Also, an absolute distance ≤ 2 on short names ("Dark" vs "Dare") gives false positives.
   - **Solution:** Use a relative threshold (`distance <= max(1, len/8)`) and skip groups with 0 live episodes.
 
@@ -322,11 +322,6 @@ _Nothing picked yet. Move items here when you start them._
 - [ ] **PERF-12 · Low · Improvement** — One `scan:progress` IPC event and one React state update per file.
   - **Location:** `src-tauri/src/commands/scanner.rs:79-86`, `src/App.jsx:104-112`
   - **Solution:** Throttle to about 10 events/s (time-based) and always send the final one.
-
-- [ ] **PERF-13 · Low · Improvement** — Missing indexes for the hot filters.
-  - **Location:** `src-tauri/src/db.rs:58-61`
-  - **Problem:** Library queries filter on `media_type` and `deleted_at`, which aren't indexed.
-  - **Solution:** `CREATE INDEX IF NOT EXISTS idx_media_type_deleted ON media(media_type, deleted_at)`.
 
 - [ ] **PERF-14 · Low · Confirmed** — Orphaned thumbnails are never removed.
   - **Location:** `src-tauri/src/commands/scanner.rs:112-118` (row deleted, jpg kept)
@@ -382,12 +377,12 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **CHORE-2 · Medium · Improvement** — No lint/format tooling.
   - **Location:** repo root
-  - **Problem:** ESLint would have caught BUG-8 (`no-shadow`), BUG-32 (`no-undef`), and missing hook deps (`react-hooks/exhaustive-deps`, e.g. `SeriesDetail.jsx:457`). `cargo clippy` currently reports 3 warnings (`Iterator::last` on `DoubleEndedIterator` ×2 at `db.rs:438-439`, a needless borrow at `utils/scanner.rs:17`).
+  - **Problem:** ESLint would have caught BUG-8 (`no-shadow`), BUG-32 (`no-undef`), and missing hook deps (`react-hooks/exhaustive-deps`, e.g. `SeriesDetail.jsx:457`). `cargo clippy` currently reports 3 warnings (`Iterator::last` on `DoubleEndedIterator` ×2 at `db.rs:445-446`, a needless borrow at `utils/scanner.rs:17`).
   - **Solution:** Add ESLint (with `react-hooks`) and Prettier for the frontend, and run `cargo clippy` / `cargo fmt` for the backend.
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 34 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 35 backend tests (`db.rs`, `utils/scanner.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
 
 - [ ] **CHORE-1 · High · Improvement** — Unit tests for `utils/parser.rs`.
   - **Location:** `src-tauri/src/utils/parser.rs`
@@ -419,7 +414,7 @@ _Current state (2026-11-04): `cargo test` runs 34 backend tests (`db.rs`, `utils
   - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (after fixing BUG-13 and BUG-32), or delete the files and the unused commands. Update AGENT.md either way.
 
 - [ ] **MAINT-2 · Low · Confirmed** — Small dead code paths.
-  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:137-140` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:402` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
+  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:137-140` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:409` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
   - **Solution:** Remove these during the next touch of each file.
 
 - [ ] **MAINT-3 · Low · Confirmed** — SeriesDetail error banner is sticky and errors are generic.
@@ -484,6 +479,7 @@ _Current state (2026-11-04): `cargo test` runs 34 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **PERF-13**: `init_schema` creates `idx_media_type_live ON media(media_type, deleted_at, missing_since)` after the ADD COLUMN migrations, matching the live-row filter used by every library query (wider than the planned `(media_type, deleted_at)` index, since `missing_since` is part of every live-row filter). A test covers an old-schema DB, idempotency, and that the query planner uses the index.
 - [x] 2026-11-04 **PERF-6**: the mpv tracker reuses one DB connection and writes and emits progress at most every 5 s (position or wall time), right away when watched flips, and on pause or any loop exit (pure `should_persist`, tested). Watched now latches for the whole session. The store's `updateEpisodeProgress` patches only the path to the matching item and skips no-op notifications.
 - [x] 2026-11-04 **BUG-25**: App.jsx's startup effect uses a `cancelled` flag. Tauri listeners that resolve after cleanup are unlistened immediately, and the discarded StrictMode mount skips the cached library load and doSync, so events no longer fire twice.
 - [x] 2026-11-04 **BUG-24**: the scan "done" → idle timer is kept in a ref and cleared when a new doSync starts and on unmount, so a quick rescan isn't reset to idle mid-scan.
