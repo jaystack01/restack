@@ -1,19 +1,45 @@
 use crate::models::ParsedEpisode;
 use regex::Regex;
+use std::sync::LazyLock;
+
+// Regexes are compiled once on first use; parsing runs several times per scanned file.
+static TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"(?i)\b(1080p|720p|2160p|4k|480p|x264|x265|h\.?264|h\.?265|hevc|avc|hindi|english|dual\.?audio|web[-\s]?dl|webrip|bluray|brrip|dvdrip|hdrip|hdtv|remux|proper|repack|extended|unrated|directors\.?cut|theatrical)\b"
+    ).expect("valid tag regex")
+});
+static BRACKET_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\[.*?\]|\(.*?\)").expect("valid bracket regex"));
+static PUNCTUATION_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"[._-]+").expect("valid punctuation regex"));
+static SPACES_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("valid spaces regex"));
+
+// Movie with year: "Inception 2010", "The Dark Knight 2008"
+static MOVIE_YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"^(.+?)\s+((?:19|20)\d{2})\b\s*(.*)$").expect("valid movie year regex")
+});
+
+// Standard series patterns with explicit season + episode, in priority order
+static SERIES_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
+    [
+        Regex::new(r"(?i)^(.+?)\s*S(\d+)E(\d+)(?:\s+(.+))?$").expect("valid primary regex"),
+        Regex::new(r"(?i)^(.+?)\s*(\d+)x(\d+)(?:\s+(.+))?$").expect("valid fallback regex"),
+        Regex::new(r"(?i)^(.+?)\s*Season\s*(\d+)\s*Episode\s*(\d+)(?:\s+(.+))?$").expect("valid fallback regex"),
+    ]
+});
+
+static E_ONLY_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+E(\d{1,3})(?:\s+(.+))?$").expect("valid E-only regex"));
+static LIGHT_CLEAN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[._]+").expect("valid"));
+static DASH_EP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(.+?)\s*-\s*(\d{1,3})(?:\s+(.+))?$").expect("valid dash-ep regex")
+});
 
 pub fn clean_text(raw: &str) -> String {
-    let tag_pattern = Regex::new(
-        r"(?i)\b(1080p|720p|2160p|4k|480p|x264|x265|h\.?264|h\.?265|hevc|avc|hindi|english|dual\.?audio|web[-\s]?dl|webrip|bluray|brrip|dvdrip|hdrip|hdtv|remux|proper|repack|extended|unrated|directors\.?cut|theatrical)\b"
-    ).expect("valid tag regex");
-
-    let bracket_pattern = Regex::new(r"\[.*?\]|\(.*?\)").expect("valid bracket regex");
-    let punctuation_pattern = Regex::new(r"[._-]+").expect("valid punctuation regex");
-    let spaces_pattern = Regex::new(r"\s+").expect("valid spaces regex");
-
-    let step1 = bracket_pattern.replace_all(raw, " ");
-    let step2 = punctuation_pattern.replace_all(&step1, " ");
-    let step3 = tag_pattern.replace_all(&step2, " ");
-    let step4 = spaces_pattern.replace_all(&step3, " ");
+    let step1 = BRACKET_RE.replace_all(raw, " ");
+    let step2 = PUNCTUATION_RE.replace_all(&step1, " ");
+    let step3 = TAG_RE.replace_all(&step2, " ");
+    let step4 = SPACES_RE.replace_all(&step3, " ");
 
     step4.trim().to_string()
 }
@@ -42,8 +68,7 @@ pub fn parse_filename(stem: &str) -> ParsedMedia {
     }
 
     // Movie with year: "Inception 2010", "The Dark Knight 2008"
-    let year_pattern = Regex::new(r"^(.+?)\s+((?:19|20)\d{2})\b\s*(.*)$").expect("valid movie year regex");
-    if let Some(caps) = year_pattern.captures(&cleaned) {
+    if let Some(caps) = MOVIE_YEAR_RE.captures(&cleaned) {
         let title = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("").to_string();
         let year: Option<u32> = caps.get(2).and_then(|m| m.as_str().parse().ok());
         if !title.is_empty() {
@@ -59,13 +84,7 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
     let cleaned = clean_text(stem);
 
     // --- Standard patterns with explicit season + episode ---
-    let patterns = [
-        Regex::new(r"(?i)^(.+?)\s*S(\d+)E(\d+)(?:\s+(.+))?$").expect("valid primary regex"),
-        Regex::new(r"(?i)^(.+?)\s*(\d+)x(\d+)(?:\s+(.+))?$").expect("valid fallback regex"),
-        Regex::new(r"(?i)^(.+?)\s*Season\s*(\d+)\s*Episode\s*(\d+)(?:\s+(.+))?$").expect("valid fallback regex"),
-    ];
-
-    for pattern in patterns {
+    for pattern in SERIES_RES.iter() {
         if let Some(caps) = pattern.captures(&cleaned) {
             let show_name = clean_text(caps.get(1)?.as_str());
             let season = caps.get(2)?.as_str().parse::<u32>().ok()?;
@@ -90,8 +109,7 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
     // --- Fallback: episode-only patterns (no season → default season 1) ---
 
     // Pattern on cleaned text: "ShowName E04 OptionalTitle"
-    let e_only = Regex::new(r"(?i)^(.+?)\s+E(\d{1,3})(?:\s+(.+))?$").expect("valid E-only regex");
-    if let Some(caps) = e_only.captures(&cleaned) {
+    if let Some(caps) = E_ONLY_RE.captures(&cleaned) {
         let show_name = clean_text(caps.get(1)?.as_str());
         let episode = caps.get(2)?.as_str().parse::<u32>().ok()?;
         let title = caps.get(3).map(|m| clean_text(m.as_str())).filter(|v| !v.is_empty());
@@ -102,9 +120,8 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
 
     // Dash-episode pattern on original stem (anime convention: "Name-04" or "Name - 04")
     // Only replace dots/underscores with spaces, keep dashes intact for detection
-    let light_clean = Regex::new(r"[._]+").expect("valid").replace_all(stem, " ");
-    let dash_ep = Regex::new(r"(?i)^(.+?)\s*-\s*(\d{1,3})(?:\s+(.+))?$").expect("valid dash-ep regex");
-    if let Some(caps) = dash_ep.captures(&light_clean) {
+    let light_clean = LIGHT_CLEAN_RE.replace_all(stem, " ");
+    if let Some(caps) = DASH_EP_RE.captures(&light_clean) {
         let raw_name = caps.get(1)?.as_str();
         let show_name = clean_text(raw_name);
         let episode = caps.get(2)?.as_str().parse::<u32>().ok()?;

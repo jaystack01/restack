@@ -135,17 +135,17 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
 
 - [ ] **BUG-15 · Medium · Confirmed** — Parser classifies resolution strings as episodes.
-  - **Location:** `src-tauri/src/utils/parser.rs:64` (`(\d+)x(\d+)`)
+  - **Location:** `src-tauri/src/utils/parser.rs:26` (`SERIES_RES` NxNN pattern `(\d+)x(\d+)`)
   - **Problem:** `Inception.2010.1920x1080` becomes Series "Inception 2010" **S1920E1080** (verified with a harness against the real parser).
   - **Solution:** Bound the NxNN pattern (`\b(\d{1,2})x(\d{2,3})\b`) and/or strip `\d{3,4}x\d{3,4}` in `clean_text`. Add a test.
 
 - [ ] **BUG-16 · Medium · Confirmed** — Date/time-stamped recordings parse as series.
-  - **Location:** `src-tauri/src/utils/parser.rs:105-106` (dash-episode pattern)
+  - **Location:** `src-tauri/src/utils/parser.rs:33-36` (`LIGHT_CLEAN_RE`/`DASH_EP_RE` statics), `:123-124` (use site)
   - **Problem:** `Screencast from 2024-05-14 12-30-45` becomes Series "Screencast from 2024 05" S1E14. `OBS 2024-05-14 10-30-12` does the same. Each recording session spawns a junk group.
   - **Solution:** Reject the dash pattern when the stem contains a `\d{4}-\d{2}-\d{2}` date. Require whitespace or a bracket before the dash when the left side ends in digits.
 
 - [ ] **BUG-17 · Medium · Confirmed** — Multi-episode and year-suffixed releases are misgrouped.
-  - **Location:** `src-tauri/src/utils/parser.rs:62-66`
+  - **Location:** `src-tauri/src/utils/parser.rs:23-29` (`SERIES_RES`)
   - **Problem:**
     1. `Breaking.Bad.S01E01E02` becomes **Other** (the `$` anchor fails on the trailing `E02`).
     2. `Doctor.Who.2005.S01E01` gives show "Doctor Who 2005", a different group from "Doctor Who" (Levenshtein 4, so no merge suggestion either).
@@ -156,7 +156,7 @@ _Nothing picked yet. Move items here when you start them._
     3. Support `S(\d+)\s*E(\d+)`.
 
 - [ ] **BUG-18 · Low · Confirmed** — Movie year picks the first year-like number.
-  - **Location:** `src-tauri/src/utils/parser.rs:45`
+  - **Location:** `src-tauri/src/utils/parser.rs:18-20` (`MOVIE_YEAR_RE`), `:71`
   - **Problem:** `Blade Runner 2049 (2017)` becomes title "Blade Runner", year 2049. The real year was in parentheses, which `clean_text` strips first.
   - **Solution:** Extract a parenthesised `(19|20)\d{2}` before bracket stripping and prefer it. Otherwise use the **last** year-like token.
 
@@ -299,11 +299,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Fine for now; revisit with large libraries. Also, an absolute distance ≤ 2 on short names ("Dark" vs "Dare") gives false positives.
   - **Solution:** Use a relative threshold (`distance <= max(1, len/8)`) and skip groups with 0 live episodes.
 
-
-- [ ] **PERF-9 · Medium · Confirmed** — Regexes are recompiled on every call.
-  - **Location:** `src-tauri/src/utils/parser.rs:5-11` (`clean_text`, 4 regexes, called 2–4× per file), `:45`, `:62-66`, `:93`, `:105-106`
-  - **Problem:** About 10–15 regex compilations per scanned file.
-  - **Solution:** Use `static RE: LazyLock<Regex>` (std, Rust 1.80+).
 
 - [ ] **PERF-10 · Medium · Confirmed** — ffprobe/ffmpeg have no timeout.
   - **Location:** `src-tauri/src/utils/scanner.rs:15-23`, `utils/thumbnail.rs:29-41`
@@ -474,6 +469,7 @@ _Current state (2026-11-04): `cargo test` runs 37 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **PERF-9**: every parser regex in `utils/parser.rs` is a `std::sync::LazyLock<Regex>` static compiled once (no new crate). Patterns and matching order are unchanged.
 - [x] 2026-11-04 **PERF-7**: `sync_library` commits upserts in batches (`UpsertBatch`: 500 rows or 1 s) and commits before probing each new file, so the write lock is never held during ffprobe/ffmpeg. Removal was already one transaction in `sync_missing_media`. Tests cover batch boundaries and a concurrent writer during probes.
 - [x] 2026-11-04 **PERF-13**: `init_schema` creates `idx_media_type_live ON media(media_type, deleted_at, missing_since)` after the ADD COLUMN migrations, matching the live-row filter used by every library query (wider than the planned `(media_type, deleted_at)` index, since `missing_since` is part of every live-row filter). A test covers an old-schema DB, idempotency, and that the query planner uses the index.
 - [x] 2026-11-04 **PERF-6**: the mpv tracker reuses one DB connection and writes and emits progress at most every 5 s (position or wall time), right away when watched flips, and on pause or any loop exit (pure `should_persist`, tested). Watched now latches for the whole session. The store's `updateEpisodeProgress` patches only the path to the matching item and skips no-op notifications.
