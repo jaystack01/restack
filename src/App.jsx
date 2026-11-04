@@ -79,6 +79,13 @@ function App() {
 
   useEffect(() => {
     const cleanupFns = [];
+    // listen() is async: StrictMode (and a real unmount) can run the cleanup
+    // before it resolves, so late unlisteners are called right away instead.
+    let cancelled = false;
+    const track = (unlisteners) => {
+      if (cancelled) unlisteners.forEach((f) => f());
+      else cleanupFns.push(...unlisteners);
+    };
 
     const handleKeyDown = (e) => {
       if ((e.ctrlKey || e.metaKey) && (e.key === "r" || e.key === "R")) {
@@ -104,12 +111,14 @@ function App() {
           }));
         }),
       ]);
-      cleanupFns.push(unlistenStart, unlistenProgress);
+      track([unlistenStart, unlistenProgress]);
+      if (cancelled) return;
 
       // Show the library saved in the DB right away, so returning users don't
       // wait for the walk. An empty DB keeps the first-scan overlay up.
       try {
         const cached = await invoke("get_library_grouped");
+        if (cancelled) return;
         if (cached.series.length || cached.movies.length || cached.others.length) {
           setLibrary(cached);
           setHasLibraryLoaded(true);
@@ -118,7 +127,9 @@ function App() {
         // fall through to the scan
       }
 
-      // Now safe to scan — listeners are live
+      // Now safe to scan — listeners are live. Skip if this mount was
+      // discarded while the cache loaded (StrictMode's first mount).
+      if (cancelled) return;
       doSync();
 
       // Register playback listeners in background (don't block scan start)
@@ -144,12 +155,13 @@ function App() {
             startSeconds: null,
           }).catch(() => {});
         }),
-      ]).then((fns) => cleanupFns.push(...fns));
+      ]).then(track);
     };
 
     init();
 
     return () => {
+      cancelled = true;
       window.removeEventListener("keydown", handleKeyDown);
       clearTimeout(doneTimerRef.current);
       doneTimerRef.current = null;
