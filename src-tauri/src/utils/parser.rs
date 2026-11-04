@@ -5,7 +5,7 @@ use std::sync::LazyLock;
 // Regexes are compiled once on first use; parsing runs several times per scanned file.
 static TAG_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"(?i)\b(1080p|720p|2160p|4k|480p|x264|x265|h\.?264|h\.?265|hevc|avc|hindi|english|dual\.?audio|web[-\s]?dl|webrip|bluray|brrip|dvdrip|hdrip|hdtv|remux|proper|repack|extended|unrated|directors\.?cut|theatrical)\b"
+        r"(?i)\b(\d{3,4}x\d{3,4}|1080p|720p|2160p|4k|480p|x264|x265|h\.?264|h\.?265|hevc|avc|hindi|english|dual\.?audio|web[-\s]?dl|webrip|bluray|brrip|dvdrip|hdrip|hdtv|remux|proper|repack|extended|unrated|directors\.?cut|theatrical)\b"
     ).expect("valid tag regex")
 });
 static BRACKET_RE: LazyLock<Regex> =
@@ -19,11 +19,12 @@ static MOVIE_YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^(.+?)\s+((?:19|20)\d{2})\b\s*(.*)$").expect("valid movie year regex")
 });
 
-// Standard series patterns with explicit season + episode, in priority order
+// Standard series patterns with explicit season + episode, in priority order.
+// NxNN is bounded (season 1-2 digits, episode 1-3) so resolutions like 1920x1080 never match.
 static SERIES_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
     [
         Regex::new(r"(?i)^(.+?)\s*S(\d+)E(\d+)(?:\s+(.+))?$").expect("valid primary regex"),
-        Regex::new(r"(?i)^(.+?)\s*(\d+)x(\d+)(?:\s+(.+))?$").expect("valid fallback regex"),
+        Regex::new(r"(?i)^(.+?)\s*\b(\d{1,2})x(\d{1,3})(?:\s+(.+))?$").expect("valid fallback regex"),
         Regex::new(r"(?i)^(.+?)\s*Season\s*(\d+)\s*Episode\s*(\d+)(?:\s+(.+))?$").expect("valid fallback regex"),
     ]
 });
@@ -253,11 +254,15 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG-15: resolution 1920x1080 parses as S1920E1080"]
     fn bug15_resolution_is_not_an_episode() {
         check(&[
             ("Inception.2010.1920x1080", movie("Inception", 2010)),
             ("Home.Video.1280x720", other("Home.Video.1280x720")),
+            ("Some.Movie.2019.3840X2160.HDR", movie("Some Movie", 2019)),
+            ("Show.S01E02.1920x1080", series("Show", 1, 2, None)),
+            // Real NxNN episodes still parse.
+            ("Show.1x5", series("Show", 1, 5, None)),
+            ("Show 12x103 Title", series("Show", 12, 103, Some("Title"))),
         ]);
     }
 

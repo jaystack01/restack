@@ -30,7 +30,7 @@ cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dir
 cd src-tauri && cargo clippy   # lint backend
 ```
 
-- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, with BUG-15 to BUG-18 as `#[ignore]`d tests), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
+- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, with BUG-16 to BUG-18 as `#[ignore]`d tests), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
 - **No frontend tests, no ESLint/Prettier config, no CI.** Verify changes with `npm run build`, `cargo check`, and `cargo test`.
 
 ### Git workflow
@@ -203,10 +203,10 @@ media (
 
 ### Parsing (`utils/parser.rs`)
 
-Order: series → movie → other. `clean_text()` strips `[...]`/`(...)`, turns `._-` into spaces, removes quality/codec/language tags (`1080p`, `x265`, `web-dl`, `hindi`, `bluray`, …).
+Order: series → movie → other. `clean_text()` strips `[...]`/`(...)`, turns `._-` into spaces, and removes quality/codec/language tags (`1080p`, `x265`, `web-dl`, `hindi`, `bluray`, …) and WxH resolutions (`1920x1080`).
 
 1. `Name S01E02 [title]`
-2. `Name 1x02 [title]`
+2. `Name 1x02 [title]` (season 1–2 digits, episode 1–3 digits, so resolutions never match)
 3. `Name Season 1 Episode 2 [title]`
 4. `Name E04 [title]` → season 1
 5. `Name - 04` (anime style, checked on the lightly cleaned stem) → season 1

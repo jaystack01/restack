@@ -134,11 +134,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch. Since PERF-7 a failing upsert rolls back only the current uncommitted batch (up to 500 rows); earlier batches stay committed, and the scan still aborts.
   - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
 
-- [ ] **BUG-15 · Medium · Confirmed** — Parser classifies resolution strings as episodes.
-  - **Location:** `src-tauri/src/utils/parser.rs:26` (`SERIES_RES` NxNN pattern `(\d+)x(\d+)`)
-  - **Problem:** `Inception.2010.1920x1080` becomes Series "Inception 2010" **S1920E1080** (verified with a harness against the real parser).
-  - **Solution:** Bound the NxNN pattern (`\b(\d{1,2})x(\d{2,3})\b`) and/or strip `\d{3,4}x\d{3,4}` in `clean_text`. Add a test.
-
 - [ ] **BUG-16 · Medium · Confirmed** — Date/time-stamped recordings parse as series.
   - **Location:** `src-tauri/src/utils/parser.rs:33-36` (`LIGHT_CLEAN_RE`/`DASH_EP_RE` statics), `:123-124` (use site)
   - **Problem:** `Screencast from 2024-05-14 12-30-45` becomes Series "Screencast from 2024 05" S1E14. `OBS 2024-05-14 10-30-12` does the same. Each recording session spawns a junk group.
@@ -377,7 +372,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 46 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 5 `#[ignore]`d tests that reproduce open bugs BUG-13 and BUG-15 to BUG-18. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 47 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 4 `#[ignore]`d tests that reproduce open bugs BUG-13 and BUG-16 to BUG-18. No frontend tests, no CI._
 
 
 
@@ -469,6 +464,7 @@ _Current state (2026-11-04): `cargo test` runs 46 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **BUG-15**: NxNN is now bounded to a 1-2 digit season and 1-3 digit episode at a word boundary, and `clean_text` strips WxH resolution tags. `Inception.2010.1920x1080` is now Movie "Inception" (2010).
 - [x] 2026-11-04 **CHORE-1**: table-driven `#[cfg(test)]` module in `utils/parser.rs` covers SxxExx, NxNN, Season/Episode, E-only, anime dash, movies with year, years as titles (1917, 2012, 1923) and the Other fallback. BUG-15 to BUG-18 each have an `#[ignore = "BUG-xx: …"]` test asserting the correct behaviour (`bug15_resolution_is_not_an_episode`, `bug16_timestamped_recordings_are_not_series`, `bug17_multi_episode_and_year_suffixed_series`, `bug18_movie_year_prefers_release_year`); remove the ignore when fixing each.
 - [x] 2026-11-04 **PERF-9**: every parser regex in `utils/parser.rs` is a `std::sync::LazyLock<Regex>` static compiled once (no new crate). Patterns and matching order are unchanged.
 - [x] 2026-11-04 **PERF-7**: `sync_library` commits upserts in batches (`UpsertBatch`: 500 rows or 1 s) and commits before probing each new file, so the write lock is never held during ffprobe/ffmpeg. Removal was already one transaction in `sync_missing_media`. Tests cover batch boundaries and a concurrent writer during probes.
