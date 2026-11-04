@@ -32,9 +32,14 @@ static SERIES_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
 static E_ONLY_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+E(\d{1,3})(?:\s+(.+))?$").expect("valid E-only regex"));
 static LIGHT_CLEAN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[._]+").expect("valid"));
+// "Name - 04" or "Name-04". A dash glued to a digit ("2024-05", "12-30") is a date or
+// time separator, not an episode marker, so the name must end in a non-digit or a space.
 static DASH_EP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)^(.+?)\s*-\s*(\d{1,3})(?:\s+(.+))?$").expect("valid dash-ep regex")
+    Regex::new(r"(?i)^(?:(.*?\S)\s+|(.*?[^\d\s]))-\s*(\d{1,3})(?:\s+(.+))?$").expect("valid dash-ep regex")
 });
+// ISO date ("2024-05-14"): screen/OBS recordings, never an episode or release year
+static DATE_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b").expect("valid date regex"));
 
 pub fn clean_text(raw: &str) -> String {
     let step1 = BRACKET_RE.replace_all(raw, " ");
@@ -64,7 +69,7 @@ pub fn parse_filename(stem: &str) -> ParsedMedia {
 
     // --- Try movie patterns ---
     let cleaned = clean_text(stem);
-    if cleaned.is_empty() {
+    if cleaned.is_empty() || DATE_RE.is_match(stem) {
         return ParsedMedia::Other { raw_name: stem.to_string() };
     }
 
@@ -122,11 +127,14 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
     // Dash-episode pattern on original stem (anime convention: "Name-04" or "Name - 04")
     // Only replace dots/underscores with spaces, keep dashes intact for detection
     let light_clean = LIGHT_CLEAN_RE.replace_all(stem, " ");
+    if DATE_RE.is_match(&light_clean) {
+        return None;
+    }
     if let Some(caps) = DASH_EP_RE.captures(&light_clean) {
-        let raw_name = caps.get(1)?.as_str();
+        let raw_name = caps.get(1).or_else(|| caps.get(2))?.as_str();
         let show_name = clean_text(raw_name);
-        let episode = caps.get(2)?.as_str().parse::<u32>().ok()?;
-        let title = caps.get(3).map(|m| clean_text(m.as_str())).filter(|v| !v.is_empty());
+        let episode = caps.get(3)?.as_str().parse::<u32>().ok()?;
+        let title = caps.get(4).map(|m| clean_text(m.as_str())).filter(|v| !v.is_empty());
         if !show_name.is_empty() && episode > 0 {
             return Some(ParsedEpisode { show_name, season: 1, episode, title });
         }
@@ -267,12 +275,29 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG-16: date/time-stamped recordings parse as series"]
     fn bug16_timestamped_recordings_are_not_series() {
-        for stem in ["Screencast from 2024-05-14 12-30-45", "OBS 2024-05-14 10-30-12"] {
+        for stem in [
+            "Screencast from 2024-05-14 12-30-45",
+            "OBS 2024-05-14 10-30-12",
+            "Recording 12-30-45",
+            "Meeting - 2024-05-14",
+            "Clip_2024-05-14_12-30",
+        ] {
             let got = parse(stem);
             assert!(!matches!(got, Got::Series(..)), "stem: {stem:?} parsed as {got:?}");
         }
+        // A date is not a release year either, so these stay Other rather than Movie.
+        check(&[
+            ("Screencast from 2024-05-14 12-30-45", other("Screencast from 2024-05-14 12-30-45")),
+            ("OBS 2024-05-14 10-30-12", other("OBS 2024-05-14 10-30-12")),
+        ]);
+        // Dash episodes still parse when the dash isn't glued to a digit.
+        check(&[
+            ("Spider-Man - 03", series("Spider Man", 1, 3, None)),
+            ("Show-Name-05", series("Show Name", 1, 5, None)),
+            ("Mob Psycho 100 - 07", series("Mob Psycho 100", 1, 7, None)),
+            ("[Grp] Show (2020)-04", series("Show", 1, 4, None)),
+        ]);
     }
 
     #[test]

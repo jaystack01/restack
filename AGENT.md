@@ -30,7 +30,7 @@ cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dir
 cd src-tauri && cargo clippy   # lint backend
 ```
 
-- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, with BUG-16 to BUG-18 as `#[ignore]`d tests), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
+- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, with BUG-17 and BUG-18 as `#[ignore]`d tests), and `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
 - **No frontend tests, no ESLint/Prettier config, no CI.** Verify changes with `npm run build`, `cargo check`, and `cargo test`.
 
 ### Git workflow
@@ -209,8 +209,8 @@ Order: series → movie → other. `clean_text()` strips `[...]`/`(...)`, turns 
 2. `Name 1x02 [title]` (season 1–2 digits, episode 1–3 digits, so resolutions never match)
 3. `Name Season 1 Episode 2 [title]`
 4. `Name E04 [title]` → season 1
-5. `Name - 04` (anime style, checked on the lightly cleaned stem) → season 1
-6. Movie: `Title 19xx|20xx ...` (year required)
+5. `Name - 04` (anime style, checked on the lightly cleaned stem) → season 1. The dash must follow a space or a non-digit, and a stem with an ISO date (`2024-05-14`) skips this rule.
+6. Movie: `Title 19xx|20xx ...` (year required). Stems with an ISO date are never movies.
 7. Else Other (raw stem)
 
 When adding a pattern, insert it at the right priority and think about false positives (e.g. a year looking like an episode number).

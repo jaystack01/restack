@@ -134,11 +134,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch. Since PERF-7 a failing upsert rolls back only the current uncommitted batch (up to 500 rows); earlier batches stay committed, and the scan still aborts.
   - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
 
-- [ ] **BUG-16 · Medium · Confirmed** — Date/time-stamped recordings parse as series.
-  - **Location:** `src-tauri/src/utils/parser.rs:33-36` (`LIGHT_CLEAN_RE`/`DASH_EP_RE` statics), `:123-124` (use site)
-  - **Problem:** `Screencast from 2024-05-14 12-30-45` becomes Series "Screencast from 2024 05" S1E14. `OBS 2024-05-14 10-30-12` does the same. Each recording session spawns a junk group.
-  - **Solution:** Reject the dash pattern when the stem contains a `\d{4}-\d{2}-\d{2}` date. Require whitespace or a bracket before the dash when the left side ends in digits.
-
 - [ ] **BUG-17 · Medium · Confirmed** — Multi-episode and year-suffixed releases are misgrouped.
   - **Location:** `src-tauri/src/utils/parser.rs:23-29` (`SERIES_RES`)
   - **Problem:**
@@ -372,7 +367,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 47 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 4 `#[ignore]`d tests that reproduce open bugs BUG-13 and BUG-16 to BUG-18. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 48 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`) plus 3 `#[ignore]`d tests that reproduce open bugs BUG-13, BUG-17 and BUG-18. No frontend tests, no CI._
 
 
 
@@ -464,6 +459,7 @@ _Current state (2026-11-04): `cargo test` runs 47 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-04 **BUG-16**: The dash-episode pattern needs a space or a non-digit before the dash, and an ISO date in the name turns off the dash fallback. Date-stamped recordings (Screencast/OBS) now stay Other instead of becoming a series or a Movie titled by their prefix.
 - [x] 2026-11-04 **BUG-15**: NxNN is now bounded to a 1-2 digit season and 1-3 digit episode at a word boundary, and `clean_text` strips WxH resolution tags. `Inception.2010.1920x1080` is now Movie "Inception" (2010).
 - [x] 2026-11-04 **CHORE-1**: table-driven `#[cfg(test)]` module in `utils/parser.rs` covers SxxExx, NxNN, Season/Episode, E-only, anime dash, movies with year, years as titles (1917, 2012, 1923) and the Other fallback. BUG-15 to BUG-18 each have an `#[ignore = "BUG-xx: …"]` test asserting the correct behaviour (`bug15_resolution_is_not_an_episode`, `bug16_timestamped_recordings_are_not_series`, `bug17_multi_episode_and_year_suffixed_series`, `bug18_movie_year_prefers_release_year`); remove the ignore when fixing each.
 - [x] 2026-11-04 **PERF-9**: every parser regex in `utils/parser.rs` is a `std::sync::LazyLock<Regex>` static compiled once (no new crate). Patterns and matching order are unchanged.
