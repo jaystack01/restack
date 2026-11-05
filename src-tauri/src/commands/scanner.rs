@@ -92,6 +92,7 @@ fn sync_library(
     let existing_files: HashMap<String, bool> = get_media_paths(conn)?.into_iter().collect();
     let mut seen_files: HashSet<String> = HashSet::new();
     let mut batch = UpsertBatch::new(conn);
+    let mut skipped = 0usize;
 
     for (index, file_path) in walk.files.iter().enumerate() {
         seen_files.insert(file_path.clone());
@@ -108,10 +109,18 @@ fn sync_library(
             continue;
         };
 
-        // Upsert — preserves watch progress, only updates metadata
-        batch.run(|tx| upsert_parsed(tx, file_path, stem, duration, thumb))?;
+        // Upsert — preserves watch progress, only updates metadata. One bad file is
+        // logged and skipped; it stays in `seen_files`, so reconciliation leaves its
+        // existing row alone instead of deleting or hiding it.
+        if let Err(e) = batch.run(|tx| upsert_parsed(tx, file_path, stem, duration, thumb))? {
+            eprintln!("Skipping {file_path}: {e}");
+            skipped += 1;
+        }
     }
     batch.commit()?;
+    if skipped > 0 {
+        eprintln!("Scan skipped {skipped} file(s) that failed to save");
+    }
 
     // Reconcile rows whose files weren't seen this scan (one transaction in db.rs)
     let (removed, missing) =
@@ -144,9 +153,15 @@ impl<'c> UpsertBatch<'c> {
     }
 
     /// Run `f` in the open batch (opening one if needed); commits once the batch is full or old.
-    /// On error the uncommitted batch rolls back; earlier batches stay committed.
-    fn run(&mut self, f: impl FnOnce(&Connection) -> Result<(), String>) -> Result<(), String> {
-        let tx = match self.tx.take() {
+    /// `f` runs inside a savepoint: if it fails, only its own writes are undone and the
+    /// batch carries on, so the row error comes back as `Ok(Err(..))`. The outer `Err`
+    /// means the batch itself broke (can't open/commit, or SQLite rolled back the whole
+    /// transaction), which aborts the scan; earlier batches stay committed.
+    fn run(
+        &mut self,
+        f: impl FnOnce(&Connection) -> Result<(), String>,
+    ) -> Result<Result<(), String>, String> {
+        let mut tx = match self.tx.take() {
             Some(tx) => tx,
             None => {
                 self.opened_at = Instant::now();
@@ -156,14 +171,35 @@ impl<'c> UpsertBatch<'c> {
                     .map_err(|e| format!("Failed to start scan transaction: {e}"))?
             }
         };
-        f(&tx)?;
-        self.rows += 1;
+
+        let sp = tx
+            .savepoint()
+            .map_err(|e| format!("Failed to start scan savepoint: {e}"))?;
+        let row = f(&sp);
+        match &row {
+            Ok(()) => sp
+                .commit()
+                .map_err(|e| format!("Failed to release scan savepoint: {e}"))?,
+            // Dropping the savepoint rolls back to it, keeping the batch's other rows
+            Err(_) => drop(sp),
+        }
+        // Some errors (disk full, I/O) make SQLite abandon the whole transaction,
+        // taking the batch's earlier rows with it: that is not a per-file failure.
+        if self.conn.is_autocommit() {
+            let cause = row.err().unwrap_or_default();
+            return Err(format!(
+                "Failed to save scan batch, transaction rolled back: {cause}"
+            ));
+        }
+        if row.is_ok() {
+            self.rows += 1;
+        }
         self.tx = Some(tx);
 
         if self.rows >= BATCH_MAX_ROWS || self.opened_at.elapsed() >= BATCH_MAX_AGE {
             self.commit()?;
         }
-        Ok(())
+        Ok(row)
     }
 
     fn commit(&mut self) -> Result<(), String> {
@@ -459,5 +495,95 @@ mod tests {
         })
         .unwrap();
         assert_eq!(probes, 40);
+    }
+
+    /// Make every write to a media row whose file name starts with `Bad.` fail, the way a
+    /// corrupt or constraint-violating row would. `action` is a SQLite RAISE action.
+    fn fail_writes_to_bad_paths(conn: &Connection, action: &str) {
+        for event in ["INSERT", "UPDATE"] {
+            conn.execute_batch(&format!(
+                "CREATE TRIGGER fail_bad_{event} BEFORE {event} ON media
+                 WHEN NEW.file_path GLOB '*/Bad.*'
+                 BEGIN SELECT RAISE({action}, 'forced failure'); END;"
+            ))
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn one_failing_file_does_not_abort_the_scan() {
+        let tmp = TempDir::new("sync-bad-new");
+        // Enough files on both sides of the bad one to cross batch boundaries
+        let mut good: Vec<String> = (1..=BATCH_MAX_ROWS * 2)
+            .map(|n| tmp.file(&format!("Show/Show.S01E{n:02}.mkv")))
+            .collect();
+        tmp.file("Lonely/Bad.Lonely.S01E01.mkv");
+        good.push(tmp.file("Movie (2001).mkv"));
+        good.sort();
+        let conn = test_db();
+        fail_writes_to_bad_paths(&conn, "ABORT");
+
+        scan(&conn, &[tmp.path("")]);
+
+        assert_eq!(visible(&conn), good);
+        // The failed row's savepoint also undid the group it created
+        let lonely: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM show_groups WHERE normalized_name = 'badlonely'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lonely, 0);
+    }
+
+    #[test]
+    fn failing_rescan_of_existing_file_keeps_its_row() {
+        let tmp = TempDir::new("sync-bad-existing");
+        let bad = tmp.file("Show/Bad.Show.S01E01.mkv");
+        let ok = tmp.file("Show/Show.S01E02.mkv");
+        let gone = tmp.file("Show/Show.S01E03.mkv");
+        let conn = test_db();
+        scan(&conn, &[tmp.path("")]);
+        update_progress(&conn, &bad, 600, false).unwrap();
+
+        // Next scan: the bad row can't be written, and a sibling file was deleted
+        fail_writes_to_bad_paths(&conn, "ABORT");
+        fs::remove_file(&gone).unwrap();
+        scan(&conn, &[tmp.path("")]);
+
+        // Reconciliation still ran, but treated the failed file as seen
+        assert_eq!(known(&conn), vec![bad.clone(), ok.clone()]);
+        assert_eq!(visible(&conn), vec![bad.clone(), ok]);
+        let pos: i64 = conn
+            .query_row(
+                "SELECT last_position FROM media WHERE file_path = ?1",
+                [&bad],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(pos, 600);
+    }
+
+    #[test]
+    fn whole_transaction_rollback_still_fails_the_scan() {
+        let tmp = TempDir::new("sync-bad-rollback");
+        tmp.file("Show/Show.S01E01.mkv");
+        tmp.file("Show/Show.S01E02.mkv");
+        tmp.file("Show/Show.S01E03.mkv");
+        tmp.file("Show/Show.S01E04.mkv");
+        tmp.file("Show/Bad.Show.S01E01.mkv");
+        let conn = test_db();
+        let walk = collect_video_files(&[tmp.path("")]);
+        scan(&conn, &[tmp.path("")]);
+        conn.execute("DELETE FROM media WHERE file_path GLOB '*/Bad.*'", [])
+            .unwrap();
+
+        // RAISE(ROLLBACK) drops the open batch, like a disk-full error would:
+        // carrying on would silently lose the batch's other rows.
+        fail_writes_to_bad_paths(&conn, "ROLLBACK");
+        let result = sync_library(&conn, &walk, |_, _, _| (0, None));
+        assert!(result.is_err(), "{result:?}");
+        assert!(conn.is_autocommit());
     }
 }

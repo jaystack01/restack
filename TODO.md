@@ -119,11 +119,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** ARCH-4 (aliases). Also only call `find_or_create_group` when the row is new or `group_id IS NULL`.
   - **Test:** `db::tests::merge_then_rescan_does_not_split` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
-- [ ] **BUG-14 · Medium · Confirmed** — One bad file aborts the whole scan, silently.
-  - **Location:** `src/App.jsx:50-54`, `src-tauri/src/commands/scanner.rs:166-172` (`upsert_parsed`)
-  - **Problem:** Any single upsert error aborts `scan_user_storage` via `?`, and the frontend swallows the error. Since PERF-8 the cached library stays on screen when the DB has data, but new and changed files are never picked up, and nobody is told. With an empty DB the overlay is dismissed onto an empty library. This repeats on every launch. Since PERF-7 a failing upsert rolls back only the current uncommitted batch (up to 500 rows); earlier batches stay committed, and the scan still aborts.
-  - **Solution:** In the scanner, log and skip per-file failures instead of aborting the whole scan. Show a non-blocking error when the scan fails (FEAT-3).
-
 - [ ] **BUG-19 · Medium · Confirmed** — Thumbnails are never generated for clips shorter than 15 s, and never retried.
   - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:65-71` (probe closure, only for `is_new`), `:97-100` (commit + `on_file` call)
   - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
@@ -401,7 +396,7 @@ _Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils
 
 - [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold.
 - [ ] **FEAT-2 (Medium)** Incremental updates via filesystem watching (`notify` crate) instead of full rescans.
-- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Silent catches today: `App.jsx:52,126,156`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
+- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Include a failed startup scan (BUG-14 made per-file failures non-fatal, but a whole failed scan is still silent in `App.jsx`). Silent catches today: `App.jsx:52,126,156`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
 - [ ] **FEAT-4 (Medium)** Startup dependency check for `mpv`, `ffmpeg`, `ffprobe` with a friendly message.
 - [ ] **FEAT-5 (Low)** Search / filter across the library.
 - [ ] **FEAT-6 (Low)** Manually edit season/episode numbers for a file (sets `user_pinned`).
@@ -427,6 +422,7 @@ _Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **BUG-14** (backend): each scan upsert runs in a savepoint inside the batch, so a failing file is rolled back alone, logged, and skipped while the scan continues and reconciles. A skipped file still counts as seen, so its existing row keeps its progress and visibility. Batch-level failures still abort. Showing a failed scan in the UI stays with FEAT-3.
 - [x] 2026-11-05 **BUG-42**: The SeriesDetail `keydown` listener is bound once and calls the current handler through a ref (`pageKeyDownRef`), so W/U (and Enter, arrows) never run a closure from an older render. `npm run lint` now reports 0 problems.
 - [x] 2026-11-05 **BUG-22**: `ui/Modal` is now an accessible dialog (`role=dialog`, `aria-modal`, initial focus on the `data-autofocus` child, Tab trap, Escape closes, focus restored on close). The SeriesDetail shortcuts ignore keys while the delete dialog is open or inside any `[role=dialog]`, so Enter presses the focused dialog button (Cancel by default) and Escape keeps the selection. Follow-up: BUG-43.
 - [x] 2026-11-05 **ARCH-2**: `player.rs` is split into a pure `parse_ipc_line` → `IpcEvent`, a pure `ProgressTracker` (injected time; returns persist/exit decisions), the `drive_ipc` loop, and `track_progress` I/O glue. Behaviour is unchanged, except that property-changes for unobserved property names are now ignored (unreachable: mpv only reports observed properties). `play_next_episode` is still emitted after the loop, from `TrackerExit::play_next`.
