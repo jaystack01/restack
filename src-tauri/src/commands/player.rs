@@ -180,6 +180,221 @@ fn start_playback(
     Ok(())
 }
 
+/// The mpv JSON-IPC messages the tracker reacts to. Everything else (command
+/// replies, other events) is ignored.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum IpcEvent {
+    /// `time-pos` changed; `None` when mpv reports `null` (nothing loaded).
+    TimePos(Option<f64>),
+    /// `duration` changed; `None` when mpv reports `null`.
+    Duration(Option<f64>),
+    /// `pause` changed; a `null` value counts as not paused.
+    Pause(bool),
+    EndFile(EndReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EndReason {
+    Eof,
+    Quit,
+    Error,
+    Stop,
+    /// Any other reason (e.g. `redirect`): playback goes on, keep tracking.
+    Other,
+}
+
+/// Parse one line of mpv IPC output. `None` for malformed or irrelevant lines.
+fn parse_ipc_line(line: &str) -> Option<IpcEvent> {
+    let json = serde_json::from_str::<serde_json::Value>(line).ok()?;
+    let data = json.get("data");
+    match json.get("event")?.as_str()? {
+        "property-change" => match json.get("name").and_then(|v| v.as_str())? {
+            "time-pos" => Some(IpcEvent::TimePos(data.and_then(|v| v.as_f64()))),
+            "duration" => Some(IpcEvent::Duration(data.and_then(|v| v.as_f64()))),
+            "pause" => Some(IpcEvent::Pause(
+                data.and_then(|v| v.as_bool()).unwrap_or(false),
+            )),
+            _ => None,
+        },
+        "end-file" => {
+            let reason = match json.get("reason").and_then(|v| v.as_str()) {
+                Some("eof") => EndReason::Eof,
+                Some("quit") => EndReason::Quit,
+                Some("error") => EndReason::Error,
+                Some("stop") => EndReason::Stop,
+                _ => EndReason::Other,
+            };
+            Some(IpcEvent::EndFile(reason))
+        }
+        _ => None,
+    }
+}
+
+/// Progress to write to the DB and emit to the frontend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProgressUpdate {
+    pos: i64,
+    watched: bool,
+}
+
+/// What the IPC loop should do after one event.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrackerStep {
+    persist: Option<ProgressUpdate>,
+    /// Playback ended: leave the IPC loop.
+    exit: bool,
+}
+
+/// What to do once the IPC loop has exited, for any reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TrackerExit {
+    /// Progress the throttle held back (quit, stop, error, killed mpv).
+    flush: Option<ProgressUpdate>,
+    /// Finished at EOF: look up the next episode and emit `play_next_episode`.
+    /// Only acted on after the loop so the frontend never kills mpv while we
+    /// still write to the socket (avoids Broken pipe).
+    play_next: bool,
+}
+
+/// Playback progress state for one mpv session. Pure: it decides what to
+/// persist, the caller does the DB writes and emits. Time is passed in.
+struct ProgressTracker {
+    pos: Option<f64>,
+    duration: Option<f64>,
+    // Latched for the whole session: seeking back below the threshold keeps it watched
+    watched: bool,
+    // Latest known progress vs. what was last written (throttled, see should_persist)
+    current: Option<(i64, bool)>,
+    persisted: Option<(i64, bool)>,
+    persisted_at: Instant,
+    finished: bool,
+}
+
+impl ProgressTracker {
+    fn new(previously_watched: bool, now: Instant) -> Self {
+        Self {
+            pos: None,
+            duration: None,
+            watched: previously_watched,
+            current: None,
+            persisted: None,
+            persisted_at: now,
+            finished: false,
+        }
+    }
+
+    fn mark_persisted(&mut self, now: Instant) -> Option<ProgressUpdate> {
+        self.persisted = self.current;
+        self.persisted_at = now;
+        self.current
+            .map(|(pos, watched)| ProgressUpdate { pos, watched })
+    }
+
+    fn handle(&mut self, event: IpcEvent, now: Instant) -> TrackerStep {
+        let mut step = TrackerStep {
+            persist: None,
+            exit: false,
+        };
+        match event {
+            // Pause is a flush point so the saved position is exact when the user stops watching
+            IpcEvent::Pause(paused) => {
+                if paused && self.current.is_some() && self.current != self.persisted {
+                    step.persist = self.mark_persisted(now);
+                }
+            }
+            IpcEvent::TimePos(pos) => {
+                self.pos = pos;
+                step.persist = self.on_progress(now);
+            }
+            IpcEvent::Duration(duration) => {
+                self.duration = duration;
+                step.persist = self.on_progress(now);
+            }
+            IpcEvent::EndFile(EndReason::Eof) => {
+                // Finished: the next play starts from the beginning
+                self.current = Some((0, true));
+                step.persist = self.mark_persisted(now);
+                self.finished = true;
+                // keep-open=no exits after EOF; do not send quit here — it races with play_next
+                step.exit = true;
+            }
+            IpcEvent::EndFile(EndReason::Quit | EndReason::Error | EndReason::Stop) => {
+                // User quit manually or we quit via script
+                step.exit = true;
+            }
+            IpcEvent::EndFile(EndReason::Other) => {}
+        }
+        step
+    }
+
+    fn on_progress(&mut self, now: Instant) -> Option<ProgressUpdate> {
+        let (Some(pos), Some(duration)) = (self.pos, self.duration) else {
+            return None;
+        };
+        self.watched = is_watched(self.watched, pos, duration);
+        let pos = pos as i64;
+        self.current = Some((pos, self.watched));
+        let since_last = now.saturating_duration_since(self.persisted_at);
+        if should_persist(self.persisted, pos, self.watched, since_last) {
+            self.mark_persisted(now)
+        } else {
+            None
+        }
+    }
+
+    /// Call once the IPC loop has exited, whatever the reason.
+    fn finish(self) -> TrackerExit {
+        let flush = match self.current {
+            Some((pos, watched)) if self.current != self.persisted => {
+                Some(ProgressUpdate { pos, watched })
+            }
+            _ => None,
+        };
+        TrackerExit {
+            flush,
+            play_next: self.finished,
+        }
+    }
+}
+
+/// Next episode in the same group after `file_path`, if any.
+fn find_next_episode(conn: &Connection, file_path: &str) -> Option<String> {
+    let (group_id, season, episode) = get_episode_meta(conn, file_path)?;
+    get_next_episode(conn, group_id, season, episode)
+}
+
+/// The IPC loop: feed each mpv line through the tracker and `persist` what it
+/// asks for, until playback ends, the socket errors, or input runs out. Then
+/// `persist` the final flush. The caller acts on `play_next` afterwards.
+fn drive_ipc(
+    lines: impl IntoIterator<Item = std::io::Result<String>>,
+    mut tracker: ProgressTracker,
+    mut now: impl FnMut() -> Instant,
+    mut persist: impl FnMut(ProgressUpdate),
+) -> TrackerExit {
+    for line in lines {
+        let Ok(line) = line else {
+            break; // Socket error or closed
+        };
+        let Some(event) = parse_ipc_line(&line) else {
+            continue;
+        };
+        let step = tracker.handle(event, now());
+        if let Some(update) = step.persist {
+            persist(update);
+        }
+        if step.exit {
+            break;
+        }
+    }
+
+    let exit = tracker.finish();
+    if let Some(update) = exit.flush {
+        persist(update);
+    }
+    exit
+}
+
 fn track_progress(
     app: AppHandle,
     socket_path: String,
@@ -226,106 +441,24 @@ fn track_progress(
     };
 
     let reader = BufReader::new(stream.try_clone().expect("Failed to clone UnixStream"));
-    let mut last_pos: Option<f64> = None;
-    let mut last_duration: Option<f64> = None;
-    // Latched for the whole session: seeking back below the threshold keeps it watched
-    let mut watched_latched = previously_watched;
-    // Latest known progress vs. what was last written (throttled, see should_persist)
-    let mut current: Option<(i64, bool)> = None;
-    let mut persisted: Option<(i64, bool)> = None;
-    let mut persisted_at = Instant::now();
-    // Emit after IPC loop so the frontend never kills mpv while we still write to the socket (avoids Broken pipe).
-    let mut play_next_after_close: Option<String> = None;
+    let tracker = ProgressTracker::new(previously_watched, Instant::now());
+    let exit = drive_ipc(reader.lines(), tracker, Instant::now, |update| {
+        persist_progress(&app, conn.as_ref(), &file_path, update.pos, update.watched)
+    });
 
-    for line in reader.lines() {
-        if let Ok(line_str) = line {
-            if let Ok(json) = serde_json::from_str::<serde_json::Value>(&line_str) {
-                if let Some(event) = json.get("event").and_then(|v| v.as_str()) {
-                    if event == "property-change" {
-                        let name = json.get("name").and_then(|v| v.as_str()).unwrap_or("");
-                        if name == "pause" {
-                            let paused =
-                                json.get("data").and_then(|v| v.as_bool()).unwrap_or(false);
-                            if let (true, Some((pos, watched))) =
-                                (paused && current != persisted, current)
-                            {
-                                persist_progress(&app, conn.as_ref(), &file_path, pos, watched);
-                                persisted = current;
-                                persisted_at = Instant::now();
-                            }
-                            continue;
-                        }
-                        if name == "time-pos" {
-                            last_pos = json.get("data").and_then(|v| v.as_f64());
-                        } else if name == "duration" {
-                            last_duration = json.get("data").and_then(|v| v.as_f64());
-                        }
-
-                        if let (Some(pos), Some(duration)) = (last_pos, last_duration) {
-                            watched_latched = is_watched(watched_latched, pos, duration);
-                            let pos = pos as i64;
-                            current = Some((pos, watched_latched));
-                            if should_persist(
-                                persisted,
-                                pos,
-                                watched_latched,
-                                persisted_at.elapsed(),
-                            ) {
-                                persist_progress(
-                                    &app,
-                                    conn.as_ref(),
-                                    &file_path,
-                                    pos,
-                                    watched_latched,
-                                );
-                                persisted = current;
-                                persisted_at = Instant::now();
-                            }
-                        }
-                    } else if event == "end-file" {
-                        let reason = json.get("reason").and_then(|v| v.as_str()).unwrap_or("");
-                        if reason == "eof" {
-                            println!("Episode finished → finding next");
-
-                            // Finished: the next play starts from the beginning
-                            persist_progress(&app, conn.as_ref(), &file_path, 0, true);
-                            current = Some((0, true));
-                            persisted = current;
-                            if let Some(conn) = conn.as_ref() {
-                                if let Some((group_id, season, episode)) =
-                                    get_episode_meta(conn, &file_path)
-                                {
-                                    if let Some(next_path) =
-                                        get_next_episode(conn, group_id, season, episode)
-                                    {
-                                        println!("Next episode: {}", next_path);
-                                        play_next_after_close = Some(next_path);
-                                    } else {
-                                        println!("End of series");
-                                    }
-                                }
-                            }
-                            // keep-open=no exits after EOF; do not send quit here — it races with play_next
-                            // (frontend would kill mpv while we still write to IPC → Broken pipe on mpv side).
-                            break;
-                        } else if reason == "quit" || reason == "error" || reason == "stop" {
-                            // User quit manually or we quit via script
-                            break;
-                        }
-                    }
-                }
-            }
-        } else {
-            break; // Socket error or closed
+    let play_next_after_close = if exit.play_next {
+        println!("Episode finished → finding next");
+        let next = conn
+            .as_ref()
+            .and_then(|conn| find_next_episode(conn, &file_path));
+        match &next {
+            Some(next_path) => println!("Next episode: {}", next_path),
+            None => println!("End of series"),
         }
-    }
-
-    // Flush whatever the throttle held back (quit, stop, error, killed mpv)
-    if let Some((pos, watched)) = current {
-        if current != persisted {
-            persist_progress(&app, conn.as_ref(), &file_path, pos, watched);
-        }
-    }
+        next
+    } else {
+        None
+    };
 
     // CLEANUP SOCKET (IMPORTANT)
     let _ = std::fs::remove_file(&socket_path);
@@ -333,6 +466,7 @@ fn track_progress(
     println!("Tracker ended for {}", file_path);
     let _ = app.emit("video_playback_stopped", file_path.clone());
 
+    // Emit only after the IPC loop has exited (see TrackerExit::play_next)
     if let Some(next_path) = play_next_after_close {
         let _ = app.emit("play_next_episode", next_path);
     }
@@ -411,5 +545,393 @@ mod tests {
             true,
             Duration::ZERO
         ));
+    }
+
+    // Lines as mpv writes them on the IPC socket
+    const TIME_POS_NULL: &str =
+        r#"{"event":"property-change","id":1,"name":"time-pos","data":null}"#;
+    const DURATION_1000: &str =
+        r#"{"event":"property-change","id":2,"name":"duration","data":1000.0}"#;
+    const PAUSED: &str = r#"{"event":"property-change","id":3,"name":"pause","data":true}"#;
+    const UNPAUSED: &str = r#"{"event":"property-change","id":3,"name":"pause","data":false}"#;
+    const END_EOF: &str = r#"{"event":"end-file","reason":"eof","playlist_entry_id":1}"#;
+    const END_QUIT: &str = r#"{"event":"end-file","reason":"quit","playlist_entry_id":1}"#;
+    const END_ERROR: &str =
+        r#"{"event":"end-file","reason":"error","playlist_entry_id":1,"file_error":"x"}"#;
+    const END_STOP: &str = r#"{"event":"end-file","reason":"stop","playlist_entry_id":1}"#;
+    const END_REDIRECT: &str = r#"{"event":"end-file","reason":"redirect"}"#;
+
+    fn time_pos(secs: f64) -> String {
+        format!(r#"{{"event":"property-change","id":1,"name":"time-pos","data":{secs}}}"#)
+    }
+
+    fn update(pos: i64, watched: bool) -> Option<ProgressUpdate> {
+        Some(ProgressUpdate { pos, watched })
+    }
+
+    /// Runs `drive_ipc` (the real `track_progress` loop) over `(wall-clock secs,
+    /// read result)` with a fake clock. Returns the persisted updates in order
+    /// (final flush included), the exit, and how many lines were read.
+    fn run_reads(
+        previously_watched: bool,
+        reads: Vec<(u64, std::io::Result<String>)>,
+    ) -> (Vec<ProgressUpdate>, TrackerExit, usize) {
+        let start = Instant::now();
+        let clock = std::cell::Cell::new(start);
+        let read = std::cell::Cell::new(0);
+        let lines = reads.into_iter().map(|(secs, line)| {
+            clock.set(start + Duration::from_secs(secs));
+            read.set(read.get() + 1);
+            line
+        });
+        let mut writes = Vec::new();
+        let tracker = ProgressTracker::new(previously_watched, start);
+        let exit = drive_ipc(lines, tracker, || clock.get(), |u| writes.push(u));
+        (writes, exit, read.get())
+    }
+
+    /// `run_reads` over lines that all read fine, ending at end of input.
+    fn run_session(
+        previously_watched: bool,
+        lines: &[(u64, &str)],
+    ) -> (Vec<ProgressUpdate>, TrackerExit) {
+        let reads = lines
+            .iter()
+            .map(|(secs, line)| (*secs, Ok(line.to_string())))
+            .collect();
+        let (writes, exit, _) = run_reads(previously_watched, reads);
+        (writes, exit)
+    }
+
+    #[test]
+    fn parse_property_changes() {
+        assert_eq!(
+            parse_ipc_line(&time_pos(12.5)),
+            Some(IpcEvent::TimePos(Some(12.5)))
+        );
+        assert_eq!(
+            parse_ipc_line(DURATION_1000),
+            Some(IpcEvent::Duration(Some(1000.0)))
+        );
+        assert_eq!(parse_ipc_line(PAUSED), Some(IpcEvent::Pause(true)));
+        assert_eq!(parse_ipc_line(UNPAUSED), Some(IpcEvent::Pause(false)));
+    }
+
+    #[test]
+    fn parse_null_data() {
+        assert_eq!(parse_ipc_line(TIME_POS_NULL), Some(IpcEvent::TimePos(None)));
+        assert_eq!(
+            parse_ipc_line(r#"{"event":"property-change","id":2,"name":"duration","data":null}"#),
+            Some(IpcEvent::Duration(None))
+        );
+        assert_eq!(
+            parse_ipc_line(r#"{"event":"property-change","id":3,"name":"pause"}"#),
+            Some(IpcEvent::Pause(false)),
+            "missing pause data counts as not paused"
+        );
+    }
+
+    #[test]
+    fn parse_end_file_reasons() {
+        for (line, reason) in [
+            (END_EOF, EndReason::Eof),
+            (END_QUIT, EndReason::Quit),
+            (END_ERROR, EndReason::Error),
+            (END_STOP, EndReason::Stop),
+            (END_REDIRECT, EndReason::Other),
+            (r#"{"event":"end-file"}"#, EndReason::Other),
+        ] {
+            assert_eq!(
+                parse_ipc_line(line),
+                Some(IpcEvent::EndFile(reason)),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn parse_ignores_replies_other_events_and_garbage() {
+        for line in [
+            r#"{"data":null,"request_id":0,"error":"success"}"#,
+            r#"{"event":"playback-restart"}"#,
+            r#"{"event":"property-change","id":4,"name":"volume","data":50}"#,
+            r#"{"event":"property-change","data":1.0}"#,
+            r#"{"event":42}"#,
+            r#"{"event":"property-change","name":"time-pos""#,
+            "not json",
+            "",
+        ] {
+            assert_eq!(parse_ipc_line(line), None, "{line}");
+        }
+    }
+
+    #[test]
+    fn nothing_persists_until_position_and_duration_are_known() {
+        let t = time_pos(10.0);
+        let (writes, exit) = run_session(false, &[(0, TIME_POS_NULL), (0, &t)]);
+        assert!(writes.is_empty());
+        assert_eq!(exit.flush, None);
+
+        let (writes, _) = run_session(false, &[(0, &t), (0, DURATION_1000)]);
+        assert_eq!(writes, vec![update(10, false).unwrap()]);
+    }
+
+    #[test]
+    fn null_time_pos_pauses_tracking() {
+        let start = Instant::now();
+        let later = start + Duration::from_secs(60);
+        let mut tracker = ProgressTracker::new(false, start);
+        tracker.handle(IpcEvent::Duration(Some(1000.0)), start);
+        let step = tracker.handle(IpcEvent::TimePos(Some(10.0)), start);
+        assert_eq!(step.persist, update(10, false));
+        let step = tracker.handle(IpcEvent::TimePos(None), start);
+        assert_eq!(step.persist, None);
+        let step = tracker.handle(IpcEvent::Duration(Some(1000.0)), later);
+        assert_eq!(step.persist, None, "no position, nothing to write");
+        let step = tracker.handle(IpcEvent::TimePos(Some(11.0)), later);
+        assert_eq!(step.persist, update(11, false));
+    }
+
+    #[test]
+    fn position_ticks_are_throttled() {
+        // One tick per second of playback, as mpv roughly reports them
+        let ticks: Vec<String> = (0..=12).map(|s| time_pos(100.0 + s as f64)).collect();
+        let mut lines = vec![(0, DURATION_1000)];
+        lines.extend(
+            ticks
+                .iter()
+                .enumerate()
+                .map(|(i, l)| (i as u64, l.as_str())),
+        );
+        let (writes, exit) = run_session(false, &lines);
+        let positions: Vec<i64> = writes.iter().map(|u| u.pos).collect();
+        // 112 is the final flush when the socket closes
+        assert_eq!(positions, vec![100, 105, 110, 112]);
+        assert!(writes.iter().all(|u| !u.watched));
+        assert!(!exit.play_next);
+    }
+
+    #[test]
+    fn small_moves_persist_after_five_seconds_of_wall_time() {
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
+        let mut tracker = ProgressTracker::new(false, start);
+        tracker.handle(IpcEvent::Duration(Some(1000.0)), at(0));
+        let step = tracker.handle(IpcEvent::TimePos(Some(100.0)), at(0));
+        assert_eq!(step.persist, update(100, false));
+        let step = tracker.handle(IpcEvent::TimePos(Some(101.0)), at(4));
+        assert_eq!(step.persist, None);
+        let step = tracker.handle(IpcEvent::TimePos(Some(102.0)), at(5));
+        assert_eq!(step.persist, update(102, false));
+        let step = tracker.handle(IpcEvent::TimePos(Some(102.0)), at(60));
+        assert_eq!(step.persist, None, "unchanged position is never rewritten");
+    }
+
+    #[test]
+    fn pause_flushes_held_back_progress() {
+        let (p100, p102) = (time_pos(100.0), time_pos(102.0));
+        let (writes, exit) = run_session(
+            false,
+            &[
+                (0, DURATION_1000),
+                (0, &p100),
+                (1, &p102),
+                (1, UNPAUSED),
+                (2, PAUSED),
+                (3, PAUSED),
+            ],
+        );
+        assert_eq!(
+            writes,
+            vec![update(100, false).unwrap(), update(102, false).unwrap()],
+            "unpause writes nothing, a second pause has nothing new"
+        );
+        assert_eq!(exit.flush, None, "the pause already flushed");
+    }
+
+    #[test]
+    fn pause_before_any_progress_writes_nothing() {
+        let (writes, _) = run_session(false, &[(0, PAUSED), (0, DURATION_1000), (0, PAUSED)]);
+        assert!(writes.is_empty());
+    }
+
+    #[test]
+    fn pause_resets_the_wall_clock_throttle() {
+        let start = Instant::now();
+        let at = |s| start + Duration::from_secs(s);
+        let mut tracker = ProgressTracker::new(false, start);
+        tracker.handle(IpcEvent::Duration(Some(1000.0)), at(0));
+        tracker.handle(IpcEvent::TimePos(Some(100.0)), at(0));
+        tracker.handle(IpcEvent::TimePos(Some(101.0)), at(3));
+        let step = tracker.handle(IpcEvent::Pause(true), at(4));
+        assert_eq!(step.persist, update(101, false));
+        let step = tracker.handle(IpcEvent::TimePos(Some(102.0)), at(6));
+        assert_eq!(step.persist, None, "only 2 s since the pause write");
+    }
+
+    #[test]
+    fn crossing_the_threshold_persists_immediately_and_latches() {
+        let lines: Vec<String> = [898.0, 900.0, 100.0, 101.0]
+            .into_iter()
+            .map(time_pos)
+            .collect();
+        let (writes, exit) = run_session(
+            false,
+            &[
+                (0, DURATION_1000),
+                (0, &lines[0]),
+                (1, &lines[1]),
+                (2, &lines[2]),
+                (3, &lines[3]),
+            ],
+        );
+        assert_eq!(
+            writes,
+            vec![
+                update(898, false).unwrap(),
+                // 2 s of position, but watched flipped
+                update(900, true).unwrap(),
+                // seeking back is ≥ 5 s of position; the latch holds
+                update(100, true).unwrap(),
+                // final flush
+                update(101, true).unwrap(),
+            ]
+        );
+        assert!(!exit.play_next);
+    }
+
+    #[test]
+    fn already_watched_stays_watched_while_rewatching() {
+        let p = time_pos(10.0);
+        let (writes, _) = run_session(true, &[(0, DURATION_1000), (0, &p), (1, END_QUIT)]);
+        assert_eq!(writes, vec![update(10, true).unwrap()]);
+    }
+
+    #[test]
+    fn eof_resets_position_and_plays_next_only_on_exit() {
+        let start = Instant::now();
+        let mut tracker = ProgressTracker::new(false, start);
+        tracker.handle(IpcEvent::Duration(Some(1000.0)), start);
+        tracker.handle(IpcEvent::TimePos(Some(995.0)), start);
+        tracker.handle(IpcEvent::TimePos(Some(997.0)), start);
+        let step = tracker.handle(IpcEvent::EndFile(EndReason::Eof), start);
+        assert_eq!(
+            step,
+            TrackerStep {
+                persist: update(0, true),
+                exit: true,
+            },
+            "eof writes position 0, watched, and leaves the loop"
+        );
+        assert_eq!(
+            tracker.finish(),
+            TrackerExit {
+                flush: None,
+                play_next: true,
+            },
+            "play next is only decided once the loop has exited"
+        );
+    }
+
+    #[test]
+    fn eof_session_ignores_lines_after_exit() {
+        let (p, late) = (time_pos(500.0), time_pos(42.0));
+        let (writes, exit) = run_session(
+            false,
+            &[
+                (0, DURATION_1000),
+                (0, &p),
+                (1, END_EOF),
+                (2, &late),
+                (2, END_QUIT),
+            ],
+        );
+        assert_eq!(
+            writes,
+            vec![update(500, false).unwrap(), update(0, true).unwrap()]
+        );
+        assert!(exit.play_next);
+    }
+
+    #[test]
+    fn eof_without_known_progress_still_marks_finished() {
+        let (writes, exit) = run_session(false, &[(0, END_EOF)]);
+        assert_eq!(writes, vec![update(0, true).unwrap()]);
+        assert!(exit.play_next);
+    }
+
+    #[test]
+    fn quit_error_and_stop_flush_and_never_play_next() {
+        let (p100, p102) = (time_pos(100.0), time_pos(102.0));
+        for end in [END_QUIT, END_ERROR, END_STOP] {
+            let (writes, exit) = run_session(
+                false,
+                &[(0, DURATION_1000), (0, &p100), (1, &p102), (1, end)],
+            );
+            assert_eq!(
+                writes,
+                vec![update(100, false).unwrap(), update(102, false).unwrap()],
+                "{end}"
+            );
+            assert_eq!(exit.flush, update(102, false), "{end}");
+            assert!(!exit.play_next, "{end}");
+        }
+    }
+
+    #[test]
+    fn other_end_reasons_keep_tracking() {
+        let (p, q) = (time_pos(100.0), time_pos(300.0));
+        let (writes, exit) = run_session(
+            false,
+            &[(0, DURATION_1000), (0, &p), (1, END_REDIRECT), (2, &q)],
+        );
+        assert_eq!(
+            writes,
+            vec![update(100, false).unwrap(), update(300, false).unwrap()]
+        );
+        assert!(!exit.play_next);
+    }
+
+    #[test]
+    fn read_error_stops_reading_and_flushes_held_back_progress() {
+        let ok = |line: &str| Ok(line.to_string());
+        let reads = vec![
+            (0, ok(DURATION_1000)),
+            (0, ok(&time_pos(100.0))),
+            (1, ok(&time_pos(101.0))),
+            (1, Err(std::io::Error::from(std::io::ErrorKind::BrokenPipe))),
+            (2, ok(&time_pos(300.0))),
+            (2, ok(END_EOF)),
+        ];
+        let (writes, exit, read) = run_reads(false, reads);
+        assert_eq!(read, 4, "nothing is read after the error");
+        assert_eq!(
+            writes,
+            vec![update(100, false).unwrap(), update(101, false).unwrap()]
+        );
+        assert_eq!(
+            exit,
+            TrackerExit {
+                flush: update(101, false),
+                play_next: false,
+            }
+        );
+    }
+
+    #[test]
+    fn end_of_input_flushes_held_back_progress() {
+        let (p100, p101) = (time_pos(100.0), time_pos(101.0));
+        let (writes, exit) = run_session(
+            false,
+            &[(0, DURATION_1000), (0, &p100), (1, &p101), (1, "garbage")],
+        );
+        assert_eq!(
+            exit,
+            TrackerExit {
+                flush: update(101, false),
+                play_next: false,
+            }
+        );
+        assert_eq!(writes.len(), 2);
     }
 }

@@ -33,7 +33,7 @@ cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dir
 cd src-tauri && cargo clippy --all-targets -- -D warnings   # lint backend (kept at 0 warnings)
 ```
 
-- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
+- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe), `commands/player.rs` (recorded mpv IPC lines through `drive_ipc` with a fake clock: throttle, watched latch, pause, eof → play next, read errors; plus the resume/watched rules), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
 - **No frontend tests yet.** CI (`.github/workflows/ci.yml`) runs lint, format check, build, clippy, and tests on every push to `develop`/`main` and on PRs. Verify locally before committing with `npm run build`, `npm run lint`, `npm run format:check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 - **Formatting**: Prettier with default options for `src/` and the root JS/JSON/HTML/CSS (`.prettierignore` skips `src-tauri`, `dist`, and Markdown), and default `cargo fmt` for Rust. Run `npm run format` before committing; don't hand-format against it.
 
@@ -144,7 +144,8 @@ src-tauri/src/
   commands/scanner.rs        scan_user_storage, scan_and_sync, get_scan_roots
   commands/library.rs        get_library_grouped, continue watching, delete/restore, reclassify
   commands/groups.rs         rename/merge/move groups, group list, merge suggestions
-  commands/player.rs         play_episode (mpv + IPC tracker), set_watched_cmd
+  commands/player.rs         play_episode (mpv + IPC tracker), set_watched_cmd; pure parse_ipc_line +
+                             ProgressTracker, drive_ipc loop, track_progress I/O glue
   utils/parser.rs            Filename → Series / Movie / Other
   utils/scanner.rs           Video ext filter, skip dirs, default roots, ffprobe duration,
                              walk (collect_video_files) + missing-row decision (reconcile_unseen)
@@ -226,7 +227,8 @@ When adding a pattern, insert it at the right priority and think about false pos
 - `play_episode(filePath, startSeconds?)`: start = `startSeconds ??` the DB `last_position`, except that a position in the last 10% (credits) restarts from 0 (`resume_position`). Kills any previous mpv child, spawns
   `mpv <file> --input-ipc-server=/tmp/mpv-<uuid>.sock --keep-open=no --no-resume-playback --script-opts=autoload-disabled=yes --force-window=no [--start=N]`.
 - A thread observes `time-pos`, `duration` and `pause` over IPC on one DB connection per playback. It writes and emits progress at most every 5 s of position or wall time (`should_persist`), right away when watched flips, and on pause and when the loop exits for any reason. **Watched latches** at ≥ 90% (`WATCHED_THRESHOLD`): an already-watched item stays watched while rewatching (`is_watched`). Watched also latches within a session, so seeking back below 90% does not un-mark it. On `eof` the position resets to 0 (watched = true).
-- On `end-file` with reason `eof` it looks up the next episode in the group and emits `play_next_episode` **after** the IPC loop closes. That ordering avoids a Broken-pipe race, so don't move it.
+- Structure: `parse_ipc_line` turns an mpv JSON line into an `IpcEvent`. `ProgressTracker` (pure, time is passed in) owns the position/watched/throttle state and returns what to persist and when to exit. `drive_ipc` is the loop (read, parse, handle, persist, break on exit or read error, final flush) and is shared by `track_progress` and the tests. `track_progress` only does the I/O: socket setup, DB writes, events.
+- On `end-file` with reason `eof`, `TrackerExit::play_next` is set. Only after `drive_ipc` returns does `track_progress` look up the next episode in the group, remove the socket, emit `video_playback_stopped`, and then emit `play_next_episode`. That ordering avoids a Broken-pipe race, so don't move it.
 - `update_progress` also sets `app_state.last_watched_episode_id` for **series** rows only, which drives Continue Watching. Manual mark watched/unwatched goes through `set_watched_cmd` (one transaction, position reset to 0) and never moves that pointer.
 - Auto-play next (`get_next_episode`) and Up Next skip trashed, missing, and non-series rows.
 - `play_episode` (body in `start_playback`) only swaps the `Child` while holding the `player_process` lock. Killing the old mpv and spawning the new one happen outside it, and if two plays race, the newest mpv is kept and the replaced one is killed.

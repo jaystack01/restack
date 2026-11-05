@@ -33,11 +33,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Mostly done on 2026-11-01: the SQL is in `db.rs`, the walk and missing-row decision are pure functions in `utils/scanner.rs`, and `sync_library` runs without an `AppHandle` (tested). What remains: `sync_library` still lives in a command file, and the probe is a closure rather than a named seam.
   - **Solution:** Move `sync_library` + `upsert_parsed` to a `services/scan.rs` when a second caller appears (e.g. FEAT-2 file watching). Low urgency now.
 
-- [ ] **ARCH-2 · Medium · Confirmed** — `player.rs` mixes four concerns in one deeply nested loop.
-  - **Location:** `src-tauri/src/commands/player.rs:151-284` (`track_progress`; IPC loop about 203-258)
-  - **Problem:** Process lifecycle, mpv JSON-IPC protocol parsing, DB writes, and event emission are interleaved six levels deep. The watched/resume rules and the throttle decision are already pure fns (`is_watched`, `resume_position`, `should_persist`, tested), but the loop glue and the `eof → next` ordering are still untested and live in one block.
-  - **Solution:** Extract `fn parse_ipc_line(&str) -> Option<IpcEvent>` (pure, testable) and a small `ProgressTracker` struct that owns the `current`/`persisted`/`persisted_at` state now held as locals in `track_progress` (calling `should_persist` and the watched latch), and keep the thread loop as glue. Preserve the "emit `play_next_episode` after the loop exits" invariant.
-
 - [ ] **ARCH-3 · Medium · Improvement** — Media identity is the file path.
   - **Location:** `src-tauri/src/db.rs:42-56` (`file_path TEXT UNIQUE`), `commands/scanner.rs:166-178` (`upsert_parsed`)
   - **Problem:** Renaming or moving a file (e.g. tidying `~/Downloads` into `~/Videos/Show/`) is seen as delete + new file. Progress, watched state, `user_pinned`, and group assignment are lost, and ffprobe/ffmpeg rerun.
@@ -352,13 +347,9 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean apart from one `exhaustive-deps` warning (BUG-42)._
+_Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean apart from one `exhaustive-deps` warning (BUG-42)._
 
 
-
-- [ ] **TEST-3 · Medium · Improvement** — mpv IPC parser and tracker tests.
-  - **Location:** `src-tauri/src/commands/player.rs` (after ARCH-2)
-  - **Solution:** Feed recorded mpv JSON lines (property-change, end-file `eof`/`quit`/`error`, null `data`). Assert the throttled persist calls, the `eof` position reset, and that `play_next_episode` is produced only after the loop ends.
 
 - [ ] **TEST-4 · Medium · Improvement** — Frontend unit tests (Vitest).
   - **Location:** `src/store/libraryStore.js`, selection logic in `src/pages/SeriesDetail.jsx`
@@ -441,6 +432,8 @@ _Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **ARCH-2**: `player.rs` is split into a pure `parse_ipc_line` → `IpcEvent`, a pure `ProgressTracker` (injected time; returns persist/exit decisions), the `drive_ipc` loop, and `track_progress` I/O glue. Behaviour is unchanged, except that property-changes for unobserved property names are now ignored (unreachable: mpv only reports observed properties). `play_next_episode` is still emitted after the loop, from `TrackerExit::play_next`.
+- [x] 2026-11-05 **TEST-3**: 20 tests feed recorded mpv IPC lines (and read errors) through the real `drive_ipc` with a fake clock: 5 s throttle, wall-clock reset on pause, watched latch, eof → position 0 + play next only at exit, quit/error/stop flush, read-error stop.
 - [x] 2026-11-05 **ARCH-5**: `src/api.js` wraps every Tauri command (JSDoc'd, returns the `invoke` promise untouched) plus `refreshLibrary()`; every `invoke()` in `src/` now goes through it. Error handling and await order are unchanged, including the silent catches (FEAT-3). `scanAndSync`, `getScanRoots`, and `getMergeSuggestions` have no callers yet (FEAT-1, MAINT-1).
 - [x] 2026-11-05 **CHORE-3**: GitHub Actions CI (`.github/workflows/ci.yml`, ubuntu-24.04, Node 24, stable Rust) runs `npm ci`, `npm run lint`, `npm run format:check`, `npm run build`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked` on pushes to `develop`/`main` and on PRs. Add `vitest run` when TEST-4 lands.
 - [x] 2026-11-05 **CHORE-2**: Added ESLint 9 (flat config `eslint.config.js`: recommended + `react`, `react-hooks`, `no-shadow`) and Prettier 3 (default options, `.prettierignore` skips `src-tauri`, `dist` and Markdown). New scripts are `npm run lint`, `npm run format`, and `npm run format:check` (Prettier + `cargo fmt --check`). Fixed the 3 clippy warnings and removed unused imports. The whole tree was then reformatted in a separate style-only commit.
