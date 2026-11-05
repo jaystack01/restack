@@ -3,9 +3,9 @@ use crate::models::{
     OtherItem, ParsedEpisode, SeasonGroup, ShowGroup,
 };
 use rusqlite::{params, Connection, OptionalExtension};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
 
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -264,15 +264,38 @@ pub fn upsert_episode(
         .map_err(|e| format!("Failed to read existing media row: {e}"))?;
 
     // Resolve (or create) a group only for rows that need one. Doing it for every
-    // rescanned file would recreate groups that were merged away (BUG-13).
-    let current_group = existing.and_then(|(group_id, _)| group_id);
+    // rescanned file would recreate groups that were merged away (BUG-13). Rows whose
+    // parsed show changed keep their group here; `rekey_renamed_shows` deals with them
+    // once the whole scan is upserted (BUG-41).
+    let seen_group = existing.and_then(|(group_id, _)| group_id);
     let group_id = match existing {
         None | Some((None, false)) => Some(find_or_create_group(conn, &parsed.show_name)?),
         Some((group_id, _)) => group_id,
     };
 
-    // `?9` is the group seen above: the row only takes `excluded.group_id` if nothing
-    // changed it in between (pinned rows always keep theirs)
+    write_episode(
+        conn,
+        file_path,
+        parsed,
+        duration,
+        thumbnail_path,
+        group_id,
+        seen_group,
+    )
+}
+
+/// The upsert itself. `seen_group` (`?9`) is the row's group when it was read: the row
+/// only takes `group_id` if nothing changed its group in between, and pinned rows
+/// always keep theirs.
+fn write_episode(
+    conn: &Connection,
+    file_path: &str,
+    parsed: &ParsedEpisode,
+    duration: i64,
+    thumbnail_path: Option<String>,
+    group_id: Option<i64>,
+    seen_group: Option<i64>,
+) -> Result<(), String> {
     conn.execute(
         "
         INSERT INTO media (file_path, show_name, season, episode, title, duration, thumbnail_path, group_id, media_type)
@@ -302,7 +325,7 @@ pub fn upsert_episode(
             duration,
             thumbnail_path,
             group_id,
-            current_group,
+            seen_group,
         ],
     )
     .map(|_| ())
@@ -563,7 +586,10 @@ pub fn rename_group(conn: &Connection, group_id: i64, new_name: &str) -> Result<
 
 /// Move all episodes from source group → target group, then delete source.
 /// The source's normalized name (and any alias that pointed at it) becomes an alias
-/// of the target, so later scans file those names under the target.
+/// of the target, so later scans file those names under the target. Aliases follow
+/// chains: merging A into B and then B into C leaves both "a" and "b" pointing at C.
+/// An alias name never matches an existing group's key (lookups resolve it first),
+/// so the source-name insert can't collide; OR IGNORE keeps any alias that already exists.
 pub fn merge_groups(conn: &Connection, source_id: i64, target_id: i64) -> Result<(), String> {
     if source_id == target_id {
         return Err("Source and target groups must be different".to_string());
@@ -605,13 +631,14 @@ pub fn merge_groups(conn: &Connection, source_id: i64, target_id: i64) -> Result
     )
     .map_err(|e| format!("Failed to re-point aliases during merge: {e}"))?;
     tx.execute(
-        "INSERT OR REPLACE INTO show_group_aliases (normalized_name, group_id) VALUES (?1, ?2)",
+        "INSERT OR IGNORE INTO show_group_aliases (normalized_name, group_id) VALUES (?1, ?2)",
         params![source_name, target_id],
     )
     .map_err(|e| format!("Failed to record merge alias: {e}"))?;
 
     tx.execute("DELETE FROM show_groups WHERE id = ?1", params![source_id])
         .map_err(|e| format!("Failed to delete source group: {e}"))?;
+    delete_empty_groups(&tx)?;
 
     tx.commit()
         .map_err(|e| format!("Failed to commit merge: {e}"))
@@ -623,14 +650,19 @@ pub fn move_episodes(
     media_ids: &[i64],
     target_group_id: i64,
 ) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Failed to start move: {e}"))?;
     for &media_id in media_ids {
-        conn.execute(
+        tx.execute(
             "UPDATE media SET group_id = ?1, user_pinned = 1 WHERE id = ?2",
             params![target_group_id, media_id],
         )
         .map_err(|e| format!("Failed to move episode id {media_id}: {e}"))?;
     }
-    Ok(())
+    delete_empty_groups(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("Failed to commit move: {e}"))
 }
 
 /// Reclassify media files between 'series', 'movie', and 'other'.
@@ -640,22 +672,25 @@ pub fn reclassify_media(
     target_type: &str,
     target_group_id: Option<i64>,
 ) -> Result<(), String> {
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Failed to start reclassify: {e}"))?;
     for &media_id in media_ids {
         if target_type == "movie" {
-            conn.execute(
+            tx.execute(
                 "UPDATE media SET media_type = 'movie', group_id = NULL, season = 0, episode = 0, user_pinned = 1 WHERE id = ?1",
                 params![media_id],
             )
             .map_err(|e| format!("Failed to reclassify to movie: {e}"))?;
         } else if target_type == "other" {
-            conn.execute(
+            tx.execute(
                 "UPDATE media SET media_type = 'other', group_id = NULL, season = 0, episode = 0, user_pinned = 1 WHERE id = ?1",
                 params![media_id],
             )
             .map_err(|e| format!("Failed to reclassify to other: {e}"))?;
         } else if target_type == "series" {
             if let Some(group_id) = target_group_id {
-                let current: (i64, i64) = conn
+                let current: (i64, i64) = tx
                     .query_row(
                         "SELECT season, episode FROM media WHERE id = ?1",
                         params![media_id],
@@ -665,18 +700,18 @@ pub fn reclassify_media(
 
                 let (season, episode) = current;
                 if season == 0 || episode == 0 {
-                    let max_ep: i64 = conn.query_row(
+                    let max_ep: i64 = tx.query_row(
                         "SELECT COALESCE(MAX(episode), 0) FROM media WHERE group_id = ?1 AND season = 1 AND deleted_at IS NULL",
                         params![group_id],
                         |row| row.get(0)
                     ).unwrap_or(0);
-                    conn.execute(
+                    tx.execute(
                         "UPDATE media SET media_type = 'series', group_id = ?1, season = 1, episode = ?2, user_pinned = 1 WHERE id = ?3",
                         params![group_id, max_ep + 1, media_id],
                     )
                     .map_err(|e| format!("Failed to reclassify to series: {e}"))?;
                 } else {
-                    conn.execute(
+                    tx.execute(
                         "UPDATE media SET media_type = 'series', group_id = ?1, user_pinned = 1 WHERE id = ?2",
                         params![group_id, media_id],
                     )
@@ -687,7 +722,24 @@ pub fn reclassify_media(
             }
         }
     }
-    Ok(())
+    delete_empty_groups(&tx)?;
+    tx.commit()
+        .map_err(|e| format!("Failed to commit reclassify: {e}"))
+}
+
+/// Delete groups that no `media` row references, and aliases left pointing at them.
+/// Counts every row, including soft-deleted and missing ones: those must keep their
+/// group so Undo or a remounted drive brings them back where they were.
+pub fn delete_empty_groups(conn: &Connection) -> Result<(), String> {
+    conn.execute_batch(
+        "
+        DELETE FROM show_groups
+            WHERE NOT EXISTS (SELECT 1 FROM media WHERE media.group_id = show_groups.id);
+        DELETE FROM show_group_aliases
+            WHERE group_id NOT IN (SELECT id FROM show_groups);
+        ",
+    )
+    .map_err(|e| format!("Failed to delete empty groups: {e}"))
 }
 
 /// Return all show groups with their episode counts. Used for the merge/move picker.
@@ -698,6 +750,7 @@ pub fn get_all_groups(conn: &Connection) -> Result<Vec<GroupInfo>, String> {
             SELECT sg.id, sg.display_name, COUNT(m.id) AS episode_count
             FROM show_groups sg
             LEFT JOIN media m ON m.group_id = sg.id
+                AND m.deleted_at IS NULL AND m.missing_since IS NULL AND m.media_type = 'series'
             GROUP BY sg.id
             ORDER BY sg.display_name COLLATE NOCASE
             ",
@@ -727,7 +780,9 @@ pub fn get_merge_suggestions(conn: &Connection) -> Result<Vec<MergeSuggestion>, 
             SELECT sg.id, sg.normalized_name, sg.display_name, COUNT(m.id) AS ep_count
             FROM show_groups sg
             LEFT JOIN media m ON m.group_id = sg.id
+                AND m.deleted_at IS NULL AND m.missing_since IS NULL AND m.media_type = 'series'
             GROUP BY sg.id
+            HAVING COUNT(m.id) > 0
             ",
         )
         .map_err(|e| format!("Failed to prepare suggestions query: {e}"))?;
@@ -1097,6 +1152,238 @@ pub fn get_media_paths(conn: &Connection) -> Result<Vec<(String, bool)>, String>
         .map_err(|e| format!("Failed to read media paths: {e}"))
 }
 
+/// A group whose rows now parse to a shorter show name than its key (BUG-41).
+struct Rekey {
+    group_id: i64,
+    old_key: String,
+    display_name: String,
+    new_key: String,
+    new_display: String,
+}
+
+fn normalized_stem(file_path: &str) -> String {
+    let stem = Path::new(file_path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(file_path);
+    normalize_name(stem)
+}
+
+/// Whether a group's display name differs from its key, i.e. the user renamed it.
+fn is_renamed(display_name: &str, key: &str) -> bool {
+    normalize_name(display_name) != key
+}
+
+/// The parser-change signature for group `id` (key `old_key`): live rows whose parsed
+/// name N is a strict prefix of the key (the parser now strips a trailing year or
+/// `s01`) and whose own file name contains the key, so the key came from that file.
+/// Rows under other names (e.g. a merge from before aliases) are ignored. All
+/// signature rows must agree on N.
+fn rekey_candidate(
+    conn: &Connection,
+    id: i64,
+    old_key: &str,
+    display_name: &str,
+) -> Result<Option<Rekey>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT file_path, show_name FROM media
+             WHERE group_id = ?1 AND media_type = 'series'
+               AND deleted_at IS NULL AND missing_since IS NULL
+             ORDER BY id",
+        )
+        .map_err(|e| format!("Failed to prepare group rows query: {e}"))?;
+    let rows = stmt
+        .query_map(params![id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| format!("Failed to read group rows: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read group rows: {e}"))?;
+
+    let mut new_name: Option<(String, String)> = None;
+    for (file_path, show_name) in rows {
+        let key = normalize_name(&show_name);
+        if key.is_empty()
+            || key == old_key
+            || !old_key.starts_with(&key)
+            || !normalized_stem(&file_path).contains(old_key)
+        {
+            continue;
+        }
+        match &new_name {
+            None => new_name = Some((key, show_name)),
+            Some((k, _)) if *k == key => {}
+            Some(_) => return Ok(None),
+        }
+    }
+
+    Ok(new_name.map(|(new_key, new_display)| Rekey {
+        group_id: id,
+        old_key: old_key.to_string(),
+        display_name: display_name.to_string(),
+        new_key,
+        new_display,
+    }))
+}
+
+/// Whether existing group `h` holds only the newer episodes of `c`'s show: no pinned
+/// rows, not renamed by the user, and every row's file (any state) carries `c`'s old key.
+fn can_absorb(conn: &Connection, h: i64, c: &Rekey) -> Result<bool, String> {
+    let (key, display, pinned): (String, String, bool) = conn
+        .query_row(
+            "SELECT normalized_name, display_name,
+                    EXISTS(SELECT 1 FROM media WHERE group_id = sg.id AND user_pinned = 1)
+             FROM show_groups sg WHERE id = ?1",
+            params![h],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .map_err(|e| format!("Failed to read group {h}: {e}"))?;
+    if pinned || is_renamed(&display, &key) {
+        return Ok(false);
+    }
+    let mut stmt = conn
+        .prepare("SELECT file_path FROM media WHERE group_id = ?1")
+        .map_err(|e| format!("Failed to prepare group paths query: {e}"))?;
+    let paths = stmt
+        .query_map(params![h], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("Failed to read group paths: {e}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read group paths: {e}"))?;
+    Ok(paths
+        .iter()
+        .all(|p| normalized_stem(p).contains(&c.old_key)))
+}
+
+/// Re-key group `c` to its new name in place (same id, so routes and progress stay),
+/// after absorbing `absorb` if given. The old key becomes an alias of the group, and
+/// a user-chosen display name is kept.
+fn apply_rekey(conn: &Connection, c: &Rekey, absorb: Option<i64>) -> Result<(), String> {
+    let g = c.group_id;
+    if let Some(h) = absorb {
+        let h_key: String = conn
+            .query_row(
+                "SELECT normalized_name FROM show_groups WHERE id = ?1",
+                params![h],
+                |row| row.get(0),
+            )
+            .map_err(|e| format!("Failed to read group {h}: {e}"))?;
+        conn.execute(
+            "UPDATE media SET group_id = ?1 WHERE group_id = ?2",
+            params![g, h],
+        )
+        .map_err(|e| format!("Failed to move episodes into re-keyed group: {e}"))?;
+        conn.execute(
+            "UPDATE show_group_aliases SET group_id = ?1 WHERE group_id = ?2",
+            params![g, h],
+        )
+        .map_err(|e| format!("Failed to re-point aliases: {e}"))?;
+        conn.execute("DELETE FROM show_groups WHERE id = ?1", params![h])
+            .map_err(|e| format!("Failed to delete absorbed group: {e}"))?;
+        if h_key != c.new_key {
+            conn.execute(
+                "INSERT OR IGNORE INTO show_group_aliases (normalized_name, group_id) VALUES (?1, ?2)",
+                params![h_key, g],
+            )
+            .map_err(|e| format!("Failed to alias absorbed group: {e}"))?;
+        }
+    }
+
+    let display = if is_renamed(&c.display_name, &c.old_key) {
+        c.display_name.as_str()
+    } else {
+        c.new_display.as_str()
+    };
+    conn.execute(
+        "DELETE FROM show_group_aliases WHERE normalized_name = ?1",
+        params![c.new_key],
+    )
+    .map_err(|e| format!("Failed to clear alias: {e}"))?;
+    conn.execute(
+        "UPDATE show_groups SET normalized_name = ?1, display_name = ?2 WHERE id = ?3",
+        params![c.new_key, display, g],
+    )
+    .map_err(|e| format!("Failed to re-key group: {e}"))?;
+    conn.execute(
+        "INSERT OR REPLACE INTO show_group_aliases (normalized_name, group_id) VALUES (?1, ?2)",
+        params![c.old_key, g],
+    )
+    .map_err(|e| format!("Failed to alias old group key: {e}"))?;
+    Ok(())
+}
+
+/// End-of-scan pass for shows whose parsed name changed under a parser fix (BUG-41),
+/// e.g. "Doctor.Who.2005.S01E01" once parsed as "Doctor Who 2005", now "Doctor Who".
+/// Runs on the rows' freshly upserted `show_name`s, so the outcome doesn't depend on
+/// walk order or batch boundaries. It never moves rows between two distinct shows:
+///
+/// - Only unpinned groups showing the parser-change signature (`rekey_candidate`).
+/// - New name unknown: re-key the group in place, if no other group claims that name.
+/// - New name is an existing group H: absorb H only if exactly one candidate can
+///   (`can_absorb`), so "Doctor Who 1963" and "Doctor Who 2005" stay separate.
+fn rekey_renamed_shows(conn: &Connection) -> Result<(), String> {
+    let groups: Vec<(i64, String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, normalized_name, display_name FROM show_groups sg
+                 WHERE NOT EXISTS (SELECT 1 FROM media WHERE group_id = sg.id AND user_pinned = 1)
+                 ORDER BY id",
+            )
+            .map_err(|e| format!("Failed to prepare re-key query: {e}"))?;
+        let collected = stmt
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .map_err(|e| format!("Failed to read groups for re-key: {e}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| format!("Failed to read groups for re-key: {e}"))?;
+        collected
+    };
+
+    let mut by_key: BTreeMap<String, Vec<Rekey>> = BTreeMap::new();
+    for (id, key, display) in &groups {
+        if let Some(c) = rekey_candidate(conn, *id, key, display)? {
+            by_key.entry(c.new_key.clone()).or_default().push(c);
+        }
+    }
+    let candidate_ids: HashSet<i64> = by_key.values().flatten().map(|c| c.group_id).collect();
+
+    // Decide everything before changing anything
+    let mut plans: Vec<(&Rekey, Option<i64>)> = Vec::new();
+    let mut absorbed: HashSet<i64> = HashSet::new();
+    for (new_key, claims) in &by_key {
+        match find_group(conn, new_key)? {
+            None if claims.len() == 1 => plans.push((&claims[0], None)),
+            None => eprintln!(
+                "Not regrouping {} groups that now all parse as \"{}\"",
+                claims.len(),
+                claims[0].new_display
+            ),
+            Some(h) if candidate_ids.contains(&h) || absorbed.contains(&h) => {}
+            Some(h) => {
+                let mut eligible = Vec::new();
+                for c in claims {
+                    if can_absorb(conn, h, c)? {
+                        eligible.push(c);
+                    }
+                }
+                if let [c] = eligible.as_slice() {
+                    absorbed.insert(h);
+                    plans.push((c, Some(h)));
+                } else {
+                    eprintln!(
+                        "Not regrouping \"{}\": \"{}\" is already a separate show",
+                        claims[0].display_name, claims[0].new_display
+                    );
+                }
+            }
+        }
+    }
+
+    for (c, absorb) in plans {
+        apply_rekey(conn, c, absorb)?;
+    }
+    Ok(())
+}
+
 /// Hard-delete rows whose files are confirmed gone, and hide rows whose storage
 /// may only be unavailable (keeps progress / pinning until the file reappears).
 pub fn sync_missing_media(
@@ -1104,7 +1391,7 @@ pub fn sync_missing_media(
     removed: &[String],
     missing: &[String],
 ) -> Result<(), String> {
-    let tx = conn
+    let mut tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("Failed to start missing-media transaction: {e}"))?;
     for file_path in removed {
@@ -1118,6 +1405,22 @@ pub fn sync_missing_media(
         )
         .map_err(|e| format!("Failed to mark media as missing: {e}"))?;
     }
+    // Last steps of every scan: follow show names changed by parser fixes, then collect
+    // groups emptied by removed rows, absorbed groups or rows that now parse as movies/others.
+    // Re-keying runs in a savepoint and only logs its errors: it is a cosmetic repair, and a
+    // bug in it must not roll back the reconcile above or make every future scan fail.
+    {
+        let sp = tx
+            .savepoint()
+            .map_err(|e| format!("Failed to start re-key savepoint: {e}"))?;
+        match rekey_renamed_shows(&sp) {
+            Ok(()) => sp
+                .commit()
+                .map_err(|e| format!("Failed to commit show re-keying: {e}"))?,
+            Err(e) => eprintln!("Skipping show re-keying: {e}"), // dropping sp rolls it back
+        }
+    }
+    delete_empty_groups(&tx)?;
     tx.commit()
         .map_err(|e| format!("Failed to commit missing-media changes: {e}"))
 }
@@ -1632,9 +1935,13 @@ mod tests {
     #[test]
     fn merge_records_and_repoints_aliases() {
         let conn = test_db();
-        let a = find_or_create_group(&conn, "Show A").unwrap();
-        let b = find_or_create_group(&conn, "Show B").unwrap();
-        let c = find_or_create_group(&conn, "Show C").unwrap();
+        for show in ["a", "b", "c"] {
+            let path = format!("/v/{show}.s01e01.mkv");
+            upsert_episode(&conn, &path, &ep(&format!("Show {show}"), 1, 1), 100, None).unwrap();
+        }
+        let a: i64 = row(&conn, "/v/a.s01e01.mkv", "group_id");
+        let b: i64 = row(&conn, "/v/b.s01e01.mkv", "group_id");
+        let c: i64 = row(&conn, "/v/c.s01e01.mkv", "group_id");
 
         merge_groups(&conn, a, b).unwrap();
         assert_eq!(alias_target(&conn, "showa"), Some(b));
@@ -1650,26 +1957,363 @@ mod tests {
         assert!(merge_groups(&conn, c, 999).is_err(), "unknown target");
     }
 
+    fn dw(year: u32, e: u32) -> String {
+        format!("/v/Doctor.Who.{year}.S01E0{e}.mkv")
+    }
+
+    /// Pre-BUG-17 library: "Doctor.Who.<year>.*" parsed as show "Doctor Who <year>".
+    fn seed_yeared_doctor_who(conn: &Connection, year: u32) -> i64 {
+        for e in 1..=2 {
+            let name = format!("Doctor Who {year}");
+            upsert_episode(conn, &dw(year, e), &ep(&name, 1, e), 100, None).unwrap();
+        }
+        row(conn, &dw(year, 1), "group_id")
+    }
+
+    /// One scan: upsert each (path, parsed show, episode), then the scan's reconcile step.
+    fn scan(conn: &Connection, files: &[(String, &str, u32)]) {
+        for (path, show, e) in files {
+            upsert_episode(conn, path, &ep(show, 1, *e), 0, None).unwrap();
+        }
+        sync_missing_media(conn, &[], &[]).unwrap();
+    }
+
+    /// Rescan of the seeded episodes under the fixed parser, plus `extra` new files.
+    fn rescan_as_doctor_who(
+        conn: &Connection,
+        year: u32,
+        extra: &[(String, &str, u32)],
+        new_first: bool,
+    ) {
+        let old: Vec<(String, &str, u32)> =
+            (1..=2).map(|e| (dw(year, e), "Doctor Who", e)).collect();
+        let files: Vec<_> = if new_first {
+            extra.iter().cloned().chain(old).collect()
+        } else {
+            old.into_iter().chain(extra.iter().cloned()).collect()
+        };
+        scan(conn, &files);
+    }
+
+    fn group_key(conn: &Connection, id: i64) -> (String, String) {
+        conn.query_row(
+            "SELECT normalized_name, display_name FROM show_groups WHERE id = ?1",
+            params![id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
     #[test]
-    fn rescan_does_not_recreate_merged_group_for_existing_rows() {
+    fn failing_rekey_keeps_the_reconcile_and_the_scan() {
+        let conn = test_db();
+        let g = seed_yeared_doctor_who(&conn, 2005);
+        conn.execute_batch(
+            "CREATE TRIGGER fail_rekey BEFORE UPDATE ON show_groups
+             BEGIN SELECT RAISE(ABORT, 'boom'); END;",
+        )
+        .unwrap();
+        upsert_episode(&conn, &dw(2005, 1), &ep("Doctor Who", 1, 1), 0, None).unwrap();
+
+        // Episode 2 is gone; the re-key of the group fails on the trigger
+        sync_missing_media(&conn, &[dw(2005, 2)], &[]).unwrap();
+
+        assert!(conn.is_autocommit());
+        let gone: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM media WHERE file_path = ?1",
+                params![dw(2005, 2)],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(gone, 0);
+        assert_eq!(group_key(&conn, g).0, "doctorwho2005");
+        assert_eq!(alias_target(&conn, "doctorwho2005"), None);
+    }
+
+    #[test]
+    fn rescan_rekeys_group_in_place() {
+        let conn = test_db();
+        let g = seed_yeared_doctor_who(&conn, 2005);
+        update_progress(&conn, &dw(2005, 1), 50, false).unwrap();
+
+        rescan_as_doctor_who(&conn, 2005, &[], false);
+
+        assert_eq!(
+            group_key(&conn, g),
+            ("doctorwho".into(), "Doctor Who".into())
+        );
+        assert_eq!(alias_target(&conn, "doctorwho2005"), Some(g));
+        assert_eq!(row::<i64>(&conn, &dw(2005, 1), "last_position"), 50);
+
+        // A later episode files straight into the same group
+        scan(&conn, &[(dw(2005, 9), "Doctor Who", 9)]);
+        assert_eq!(row::<i64>(&conn, &dw(2005, 9), "group_id"), g);
+        assert_eq!(group_count(&conn), 1);
+    }
+
+    #[test]
+    fn renamed_group_keeps_id_and_title_after_rescan() {
+        for new_first in [true, false] {
+            let conn = test_db();
+            let g = seed_yeared_doctor_who(&conn, 2005);
+            rename_group(&conn, g, "Doctor Who (New Who)").unwrap();
+
+            rescan_as_doctor_who(&conn, 2005, &[(dw(2005, 9), "Doctor Who", 9)], new_first);
+
+            let lib = get_grouped_library(&conn).unwrap();
+            assert_eq!(lib.len(), 1, "new_first = {new_first}");
+            assert_eq!(lib[0].group_id, g);
+            assert_eq!(lib[0].display_name, "Doctor Who (New Who)");
+            assert_eq!(lib[0].seasons[0].episodes.len(), 3);
+            assert_eq!(group_count(&conn), 1);
+        }
+    }
+
+    #[test]
+    fn new_episode_joins_old_group_in_any_walk_order() {
+        for new_first in [true, false] {
+            let conn = test_db();
+            let g = seed_yeared_doctor_who(&conn, 2005);
+            update_progress(&conn, &dw(2005, 1), 50, false).unwrap();
+
+            rescan_as_doctor_who(&conn, 2005, &[(dw(2005, 9), "Doctor Who", 9)], new_first);
+
+            let lib = get_grouped_library(&conn).unwrap();
+            assert_eq!(lib.len(), 1, "new_first = {new_first}");
+            assert_eq!(lib[0].group_id, g);
+            assert_eq!(lib[0].display_name, "Doctor Who");
+            assert_eq!(lib[0].seasons[0].episodes.len(), 3);
+            assert_eq!(row::<i64>(&conn, &dw(2005, 1), "last_position"), 50);
+        }
+    }
+
+    #[test]
+    fn split_left_by_an_earlier_scan_is_healed() {
+        let conn = test_db();
+        let g = seed_yeared_doctor_who(&conn, 2005);
+        // An older build already rescanned: the rows' show_name is "Doctor Who", they
+        // stayed in the yeared group, and the new episode got its own "Doctor Who" group
+        for e in 1..=2 {
+            upsert_episode(&conn, &dw(2005, e), &ep("Doctor Who", 1, e), 0, None).unwrap();
+        }
+        upsert_episode(&conn, &dw(2005, 9), &ep("Doctor Who", 1, 9), 100, None).unwrap();
+        let h: i64 = row(&conn, &dw(2005, 9), "group_id");
+        assert_ne!(h, g);
+
+        rescan_as_doctor_who(&conn, 2005, &[(dw(2005, 9), "Doctor Who", 9)], true);
+
+        assert_eq!(row::<i64>(&conn, &dw(2005, 9), "group_id"), g);
+        assert_eq!(
+            group_key(&conn, g),
+            ("doctorwho".into(), "Doctor Who".into())
+        );
+        assert_eq!(group_count(&conn), 1);
+    }
+
+    #[test]
+    fn distinct_shows_with_the_same_new_name_stay_separate() {
+        for classic_first in [true, false] {
+            let conn = test_db();
+            let (classic, modern) = if classic_first {
+                let c = seed_yeared_doctor_who(&conn, 1963);
+                (c, seed_yeared_doctor_who(&conn, 2005))
+            } else {
+                let m = seed_yeared_doctor_who(&conn, 2005);
+                (seed_yeared_doctor_who(&conn, 1963), m)
+            };
+            let mut files: Vec<(String, &str, u32)> = Vec::new();
+            for year in [1963, 2005] {
+                files.extend((1..=2).map(|e| (dw(year, e), "Doctor Who", e)));
+            }
+            if !classic_first {
+                files.reverse();
+            }
+
+            scan(&conn, &files);
+            assert_eq!(group_key(&conn, classic).0, "doctorwho1963");
+            assert_eq!(group_key(&conn, modern).0, "doctorwho2005");
+
+            // A new 2005 episode gets its own group first; only the 2005 show can absorb it
+            scan(&conn, &[(dw(2005, 9), "Doctor Who", 9)]);
+            assert_eq!(row::<i64>(&conn, &dw(2005, 9), "group_id"), modern);
+            assert_eq!(group_key(&conn, modern).1, "Doctor Who");
+            assert_eq!(group_key(&conn, classic).1, "Doctor Who 1963");
+            for e in 1..=2 {
+                assert_eq!(row::<i64>(&conn, &dw(1963, e), "group_id"), classic);
+            }
+            assert_eq!(group_count(&conn), 2);
+        }
+    }
+
+    #[test]
+    fn group_mixing_two_old_shows_is_not_absorbed() {
+        let conn = test_db();
+        let classic = seed_yeared_doctor_who(&conn, 1963);
+        let modern = seed_yeared_doctor_who(&conn, 2005);
+        // A "Doctor Who" group holding episodes of both shows
+        scan(
+            &conn,
+            &[
+                (dw(1963, 9), "Doctor Who", 9),
+                (dw(2005, 9), "Doctor Who", 9),
+            ],
+        );
+        let h: i64 = row(&conn, &dw(1963, 9), "group_id");
+
+        let mut files: Vec<(String, &str, u32)> = Vec::new();
+        for year in [1963, 2005] {
+            files.extend((1..=2).map(|e| (dw(year, e), "Doctor Who", e)));
+        }
+        scan(&conn, &files);
+
+        assert_eq!(row::<i64>(&conn, &dw(2005, 9), "group_id"), h);
+        assert_eq!(row::<i64>(&conn, &dw(2005, 1), "group_id"), modern);
+        assert_eq!(row::<i64>(&conn, &dw(1963, 1), "group_id"), classic);
+        assert_eq!(group_count(&conn), 3);
+    }
+
+    #[test]
+    fn renamed_new_name_group_is_not_absorbed() {
+        let conn = test_db();
+        let g = seed_yeared_doctor_who(&conn, 2005);
+        scan(&conn, &[(dw(2005, 9), "Doctor Who", 9)]);
+        let h: i64 = row(&conn, &dw(2005, 9), "group_id");
+        rename_group(&conn, h, "Specials").unwrap();
+
+        rescan_as_doctor_who(&conn, 2005, &[], false);
+
+        assert_eq!(row::<i64>(&conn, &dw(2005, 9), "group_id"), h);
+        assert_eq!(group_key(&conn, g).0, "doctorwho2005");
+        assert_eq!(group_count(&conn), 2);
+    }
+
+    #[test]
+    fn rescan_never_undoes_a_merge() {
         let conn = test_db();
         upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("Show A", 1, 1), 100, None).unwrap();
+        upsert_episode(&conn, "/v/a.s01e02.mkv", &ep("Show A", 1, 2), 100, None).unwrap();
         upsert_episode(&conn, "/v/b.s01e01.mkv", &ep("Show B", 1, 1), 100, None).unwrap();
         let a: i64 = row(&conn, "/v/a.s01e01.mkv", "group_id");
         let b: i64 = row(&conn, "/v/b.s01e01.mkv", "group_id");
-        // Simulate a merge from before aliases existed: no alias row is left behind
-        conn.execute(
-            "UPDATE media SET group_id = ?1 WHERE group_id = ?2",
-            params![b, a],
+        merge_groups(&conn, a, b).unwrap();
+
+        scan(
+            &conn,
+            &[
+                ("/v/a.s01e01.mkv".into(), "Show A", 1),
+                ("/v/a.s01e02.mkv".into(), "Show A", 2),
+                ("/v/b.s01e01.mkv".into(), "Show B", 1),
+            ],
+        );
+
+        for path in ["/v/a.s01e01.mkv", "/v/a.s01e02.mkv", "/v/b.s01e01.mkv"] {
+            assert_eq!(row::<i64>(&conn, path, "group_id"), b, "{path}");
+        }
+        assert_eq!(group_key(&conn, b), ("showb".into(), "Show B".into()));
+        assert_eq!(group_count(&conn), 1);
+    }
+
+    #[test]
+    fn pre_alias_merge_is_not_reshuffled() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/Show.S01E01.mkv", &ep("Show", 1, 1), 100, None).unwrap();
+        upsert_episode(
+            &conn,
+            "/v/Show.2005.S01E01.mkv",
+            &ep("Show 2005", 1, 1),
+            100,
+            None,
         )
         .unwrap();
-        conn.execute("DELETE FROM show_groups WHERE id = ?1", params![a])
+        let plain: i64 = row(&conn, "/v/Show.S01E01.mkv", "group_id");
+        let yeared: i64 = row(&conn, "/v/Show.2005.S01E01.mkv", "group_id");
+        // "Show" merged into "Show 2005" by a build without aliases: no alias row left
+        conn.execute(
+            "UPDATE media SET group_id = ?1 WHERE group_id = ?2",
+            params![yeared, plain],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM show_groups WHERE id = ?1", params![plain])
             .unwrap();
 
-        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("Show A", 1, 1), 0, None).unwrap();
+        scan(&conn, &[("/v/Show.S01E01.mkv".into(), "Show", 1)]);
 
-        assert_eq!(row::<i64>(&conn, "/v/a.s01e01.mkv", "group_id"), b);
+        assert_eq!(row::<i64>(&conn, "/v/Show.S01E01.mkv", "group_id"), yeared);
+        assert_eq!(
+            group_key(&conn, yeared),
+            ("show2005".into(), "Show 2005".into())
+        );
         assert_eq!(group_count(&conn), 1);
+    }
+
+    #[test]
+    fn pinned_rows_freeze_their_group() {
+        let conn = test_db();
+        let g = seed_yeared_doctor_who(&conn, 2005);
+        upsert_episode(&conn, "/v/extra.s01e05.mkv", &ep("Extras", 1, 5), 100, None).unwrap();
+        // The user moved an episode into the yeared group by hand
+        move_episodes(&conn, &[id_of(&conn, "/v/extra.s01e05.mkv")], g).unwrap();
+
+        rescan_as_doctor_who(&conn, 2005, &[(dw(2005, 9), "Doctor Who", 9)], false);
+
+        assert_eq!(
+            group_key(&conn, g),
+            ("doctorwho2005".into(), "Doctor Who 2005".into())
+        );
+        assert_eq!(row::<i64>(&conn, &dw(2005, 1), "group_id"), g);
+        assert_eq!(row::<i64>(&conn, "/v/extra.s01e05.mkv", "group_id"), g);
+        assert_ne!(row::<i64>(&conn, &dw(2005, 9), "group_id"), g);
+    }
+
+    #[test]
+    fn upsert_keeps_a_group_changed_after_it_was_read() {
+        let conn = test_db();
+        upsert_other(&conn, "/v/x.s01e01.mkv", "x", 100, None).unwrap();
+        let resolved = find_or_create_group(&conn, "X").unwrap();
+        let concurrent = find_or_create_group(&conn, "Elsewhere").unwrap();
+        // upsert_episode read group NULL; another connection sets one before the write
+        conn.execute(
+            "UPDATE media SET group_id = ?1 WHERE file_path = '/v/x.s01e01.mkv'",
+            params![concurrent],
+        )
+        .unwrap();
+
+        write_episode(
+            &conn,
+            "/v/x.s01e01.mkv",
+            &ep("X", 1, 1),
+            0,
+            None,
+            Some(resolved),
+            None,
+        )
+        .unwrap();
+        assert_eq!(row::<i64>(&conn, "/v/x.s01e01.mkv", "group_id"), concurrent);
+
+        // Unchanged since the read: the resolved group is taken
+        write_episode(
+            &conn,
+            "/v/x.s01e01.mkv",
+            &ep("X", 1, 1),
+            0,
+            None,
+            Some(resolved),
+            Some(concurrent),
+        )
+        .unwrap();
+        assert_eq!(row::<i64>(&conn, "/v/x.s01e01.mkv", "group_id"), resolved);
+    }
+
+    #[test]
+    fn merge_suggestions_skip_groups_without_live_episodes() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/show.s01e01.mkv", &ep("Show", 1, 1), 100, None).unwrap();
+        upsert_episode(&conn, "/v/shows.s01e01.mkv", &ep("Shows", 1, 1), 100, None).unwrap();
+        assert_eq!(get_merge_suggestions(&conn).unwrap().len(), 1);
+
+        mark_deleted(&conn, "/v/shows.s01e01.mkv").unwrap();
+        assert!(get_merge_suggestions(&conn).unwrap().is_empty());
     }
 
     #[test]
@@ -1714,5 +2358,130 @@ mod tests {
         upsert_episode(&conn, "/v/old.s01e02.mkv", &ep("Old", 1, 2), 0, None).unwrap();
         assert_eq!(row::<i64>(&conn, "/v/old.s01e02.mkv", "group_id"), 7);
         assert_eq!(library_paths(&conn).len(), 2);
+    }
+
+    #[test]
+    fn empty_groups_are_collected_after_scan_reconcile() {
+        let conn = test_db();
+        seed_yeared_doctor_who(&conn, 2005);
+        upsert_episode(&conn, "/v/gone.s01e01.mkv", &ep("Gone", 1, 1), 100, None).unwrap();
+        for e in 1..=2 {
+            let path = format!("/v/Doctor.Who.2005.S01E0{e}.mkv");
+            upsert_episode(&conn, &path, &ep("Doctor Who", 1, e), 0, None).unwrap();
+        }
+
+        sync_missing_media(&conn, &["/v/gone.s01e01.mkv".into()], &[]).unwrap();
+
+        let names: Vec<String> = get_all_groups(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|g| g.display_name)
+            .collect();
+        assert_eq!(names, vec!["Doctor Who"]);
+    }
+
+    #[test]
+    fn gc_keeps_groups_of_soft_deleted_and_missing_rows() {
+        let conn = test_db();
+        upsert_episode(
+            &conn,
+            "/v/trashed.s01e01.mkv",
+            &ep("Trashed", 1, 1),
+            100,
+            None,
+        )
+        .unwrap();
+        upsert_episode(
+            &conn,
+            "/v/offline.s01e01.mkv",
+            &ep("Offline", 1, 1),
+            100,
+            None,
+        )
+        .unwrap();
+        let trashed: i64 = row(&conn, "/v/trashed.s01e01.mkv", "group_id");
+        mark_deleted(&conn, "/v/trashed.s01e01.mkv").unwrap();
+
+        sync_missing_media(&conn, &[], &["/v/offline.s01e01.mkv".into()]).unwrap();
+        assert_eq!(group_count(&conn), 2);
+
+        // Undo and remount bring the rows back into their old groups
+        mark_restored(&conn, "/v/trashed.s01e01.mkv").unwrap();
+        upsert_episode(
+            &conn,
+            "/v/offline.s01e01.mkv",
+            &ep("Offline", 1, 1),
+            0,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            row::<i64>(&conn, "/v/trashed.s01e01.mkv", "group_id"),
+            trashed
+        );
+        assert_eq!(get_grouped_library(&conn).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn move_reclassify_and_merge_drop_emptied_groups_and_aliases() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("Show A", 1, 1), 100, None).unwrap();
+        upsert_episode(&conn, "/v/b.s01e01.mkv", &ep("Show B", 1, 1), 100, None).unwrap();
+        upsert_episode(&conn, "/v/c.s01e01.mkv", &ep("Show C", 1, 1), 100, None).unwrap();
+        upsert_episode(&conn, "/v/d.s01e01.mkv", &ep("Show D", 1, 1), 100, None).unwrap();
+        let a: i64 = row(&conn, "/v/a.s01e01.mkv", "group_id");
+        let b: i64 = row(&conn, "/v/b.s01e01.mkv", "group_id");
+        let c: i64 = row(&conn, "/v/c.s01e01.mkv", "group_id");
+
+        merge_groups(&conn, a, b).unwrap();
+        assert_eq!(alias_target(&conn, "showa"), Some(b));
+        assert_eq!(group_count(&conn), 3);
+
+        // Moving every episode out of B empties it: B and its alias go
+        let ids = [
+            id_of(&conn, "/v/a.s01e01.mkv"),
+            id_of(&conn, "/v/b.s01e01.mkv"),
+        ];
+        move_episodes(&conn, &ids, c).unwrap();
+        assert_eq!(group_count(&conn), 2);
+        assert_eq!(alias_target(&conn, "showa"), None);
+
+        reclassify_media(&conn, &[id_of(&conn, "/v/d.s01e01.mkv")], "movie", None).unwrap();
+        assert_eq!(group_count(&conn), 1);
+    }
+
+    #[test]
+    fn group_counts_only_live_series_episodes() {
+        let conn = test_db();
+        for e in 1..=4 {
+            let path = format!("/v/show.s01e0{e}.mkv");
+            upsert_episode(&conn, &path, &ep("Show", 1, e), 100, None).unwrap();
+        }
+        upsert_episode(&conn, "/v/shows.s01e01.mkv", &ep("Shows", 1, 1), 100, None).unwrap();
+        mark_deleted(&conn, "/v/show.s01e02.mkv").unwrap();
+        sync_missing_media(&conn, &[], &["/v/show.s01e03.mkv".into()]).unwrap();
+        // A row that is in the group but isn't a series (normal code clears group_id)
+        conn.execute(
+            "UPDATE media SET media_type = 'other' WHERE file_path = '/v/show.s01e04.mkv'",
+            [],
+        )
+        .unwrap();
+
+        let show = get_all_groups(&conn)
+            .unwrap()
+            .into_iter()
+            .find(|g| g.display_name == "Show")
+            .unwrap();
+        assert_eq!(show.episode_count, 1);
+
+        let suggestions = get_merge_suggestions(&conn).unwrap();
+        assert_eq!(suggestions.len(), 1);
+        let s = &suggestions[0];
+        let counts = if s.display_name_a == "Show" {
+            (s.episode_count_a, s.episode_count_b)
+        } else {
+            (s.episode_count_b, s.episode_count_a)
+        };
+        assert_eq!(counts, (1, 1));
     }
 }

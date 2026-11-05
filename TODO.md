@@ -93,15 +93,6 @@ _Nothing picked yet. Move items here when you start them._
 
 
 
-- [ ] **BUG-4 · Low · Confirmed** — `get_all_groups` / merge-suggestion episode counts include soft-deleted and non-series rows.
-  - **Location:** `src-tauri/src/db.rs` (`get_all_groups`, `get_merge_suggestions`)
-  - **Solution:** `LEFT JOIN media m ON m.group_id = sg.id AND m.deleted_at IS NULL AND m.missing_since IS NULL AND m.media_type = 'series'`.
-
-- [ ] **BUG-5 · Medium · Confirmed** — Empty `show_groups` are never cleaned up.
-  - **Location:** `src-tauri/src/db.rs` (only merge and the one-time `migrate_existing_groups` run delete groups); amplified by BUG-13
-  - **Problem:** The one-time migration (2026-11-01) clears the backlog once, but nothing collects groups emptied later by moves, reclassify, or deleted files. Evidence before that: the local DB has 43 groups and **0** of them have a live series episode. They still appear in `get_all_groups` pickers and merge suggestions. The 2026-11-04 parser fixes (BUG-15 to BUG-17) make this worse: on the next rescan unpinned rows leave junk groups such as "Inception 2010" (S1920), "Screencast from 2024 05" and "Doctor Who 2005" empty, one per old misparse.
-  - **Solution:** Run `DELETE FROM show_groups WHERE id NOT IN (SELECT DISTINCT group_id FROM media WHERE group_id IS NOT NULL)` at the end of each scan and after move/reclassify/merge. Keep alias rows (ARCH-4) pointing to live groups only.
-
 
 
 
@@ -174,7 +165,7 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **BUG-35 · Low · Confirmed** — Hidden rows (`missing_since`) and trashed rows (`deleted_at`) are never purged.
   - **Location:** `src-tauri/src/commands/scanner.rs` (reconcile loop), `src-tauri/src/db.rs` (`sync_missing_media`)
-  - **Problem:** The 2026-11-01 data-loss fix keeps a row whenever deletion isn't certain. A deleted show folder, a drive that never returns, or a trashed episode leave hidden rows forever. They're invisible in the library but still hold `group_id` (BUG-5 GC can't drop those groups), count toward BUG-4 totals until that's fixed, and keep orphan thumbnails (PERF-14).
+  - **Problem:** The 2026-11-01 data-loss fix keeps a row whenever deletion isn't certain. A deleted show folder, a drive that never returns, or a trashed episode leave hidden rows forever. They're invisible in the library but still hold `group_id` (by design, group GC keeps those groups so Undo/remount work; they show 0 live episodes), and keep orphan thumbnails (PERF-14).
   - **Solution:** Purge `deleted_at` rows when their item is no longer in the Trash (`trash::os_limited::list`) or after N days. Offer a "Missing files" view (or a setting) to forget `missing_since` rows, and/or auto-purge after N days once FEAT-1 adds settings.
 
 - [ ] **BUG-37 · Low · Potential** — An old tracker's final flush can move Continue Watching back to the previous episode.
@@ -186,17 +177,13 @@ _Nothing picked yet. Move items here when you start them._
 - [ ] **BUG-39 · Low · Improvement** — Show names that really end in a year lose it.
   - **Location:** `src-tauri/src/utils/parser.rs` `series_show_name` / `SHOW_YEAR_RE`
   - **Problem:** The BUG-17 trailing-year strip turns `Space.1999.S01E01` into "Space", and different shows that share a base name merge, e.g. `The.Flash.2014` and `The.Flash.1990` both become "The Flash". Grouping stays consistent and `rename_group` fixes the display name, but the two series end up in one group. Cosmetic variant: `Show 1999-2000 - 05` gives "Show 1999", because only one trailing year is stripped after `clean_text`.
+  - **Since 2026-11-05 (BUG-41):** existing groups are re-keyed in place and two distinct existing shows are never merged, so `The.Flash.1990` and `The.Flash.2014` groups stay separate (a note is logged on each scan). New files still parse to the bare name and go to whichever group owns it: the first new 2014 episode is absorbed by the 2014 group, which then owns "The Flash", so a later new 1990 episode would file there too and isn't moved back.
   - **Solution:** If this shows up in practice, keep the year when there are both a yeared and an unyeared group for the same base name. Or record the stripped year on the row (additive column) and include it in the group key only when two years collide.
 
 - [ ] **BUG-40 · Low · Potential** — A bare resolution after a dash parses as an anime episode.
   - **Location:** `src-tauri/src/utils/parser.rs` `DASH_EP_RE` (4-digit episodes since BUG-38)
   - **Problem:** 4-digit dash episodes accept 1000-1899 and 2100-9999, so `Show - 1080` or `Show - 2160` (no `p`) becomes S1E1080 / S1E2160. With the `p` suffix it is stripped and falls through correctly. Found in review, not seen in a real library.
   - **Solution:** Reject common vertical resolutions (`1080`, `1440`, `2160`, `4320`) as 4-digit dash episodes, or require a 4-digit episode to sit next to a show whose other files also use 3+ digit numbering.
-
-- [ ] **BUG-41 · Medium · Confirmed** — Parser fixes that change a show name split existing shows when new episodes arrive.
-  - **Location:** `src-tauri/src/db.rs` `upsert_episode` (`group_id = CASE … WHEN media.group_id IS NULL THEN excluded.group_id ELSE media.group_id END`), `find_or_create_group`; triggered by BUG-17 (2026-11-04)
-  - **Problem:** An existing unpinned series row keeps its `group_id` on rescan; only `show_name` is updated. After BUG-17 strips trailing years and fixes `S01.E02`, old `Doctor.Who.2005.S01E01` rows stay in group "Doctor Who 2005", while a newly added `Doctor.Who.2005.S01E09` parses as "Doctor Who" and lands in a different (new or existing) group, splitting the show. Same for `show s01`-style groups. Rows that change *type* (series → movie/other) are unaffected, because type changes clear `group_id`. Verified by reading the upsert; not reproduced against a real library.
-  - **Solution:** Decide with ARCH-4/BUG-13 (aliases), since naively re-deriving `group_id` from `show_name` would undo merges and moves. A cheap interim option: when a rescan finds an unpinned row whose group's `normalized_name` differs from `normalize_name(show_name)` *and* that group has no pinned rows, move it to the parsed group and garbage-collect the emptied group (BUG-5). Add a db test with a pre-BUG-17 group.
 
 - [ ] **BUG-43 · Low · Confirmed** — Enter on a focused page button plays the focused episode instead of pressing the button.
   - **Location:** `src/pages/SeriesDetail.jsx` (`onPageKeyDown`, the `enter` branch)
@@ -321,7 +308,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-05): `cargo test` runs 88 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`), none ignored. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
+_Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`), none ignored. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
 
 
 
@@ -406,6 +393,9 @@ _Current state (2026-11-05): `cargo test` runs 88 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **BUG-41**: the end of every scan re-keys shows renamed by parser fixes **in place** (`rekey_renamed_shows`, in a savepoint so its errors never fail the scan): same id and route, the old key becomes an alias, a user rename is kept. A group that already owns the new name is absorbed only if it holds just that show's own newer episodes. Two distinct existing shows are never merged automatically (maintainer decision); see BUG-39 for what's left.
+- [x] 2026-11-05 **BUG-5**: `delete_empty_groups` drops groups no media row references (plus their aliases) after every scan and inside merge, move, and reclassify (now transactional). Groups of trashed or missing rows are kept for Undo/remount.
+- [x] 2026-11-05 **BUG-4**: group counts in `get_all_groups` and merge suggestions include only live series rows, and merge suggestions skip groups with no live episodes.
 - [x] 2026-11-05 **ARCH-4**: additive `show_group_aliases` table. `find_group` checks aliases before `normalized_name`; `merge_groups` (now one transaction, errors on unknown ids) aliases the source name to the target and re-points the source's aliases. Merges made before this change left no alias.
 - [x] 2026-11-05 **BUG-13**: merged-away names resolve through their alias, and the upsert only resolves a group for new or NULL-group rows (compare-and-set on the group it read), so a merge is no longer undone by the next scan. `merge_then_rescan_does_not_split` is un-ignored and passes.
 - [x] 2026-11-05 **PERF-10**: ffprobe (30 s) and ffmpeg thumbnails (60 s) run through a std-only `run_with_timeout`; a hung child is killed and reaped in the background, and the file is treated as a per-file failure (duration 0 / no thumbnail). Thumbnails are written to `.part` and renamed on success, so a truncated file or dead mount can no longer stall the scan and hold the scan guard.
