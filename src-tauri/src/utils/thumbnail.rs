@@ -31,6 +31,11 @@ pub fn generate_thumbnail(app: &AppHandle, video_path: &str) -> Option<String> {
         return Some(output_path.to_string_lossy().to_string());
     }
 
+    // ffmpeg writes to a temp name that is renamed into place only on success, so a
+    // killed, crashed or late-writing ffmpeg never leaves a partial JPEG under the
+    // final name (which the exists() check above would serve forever). Format, codec
+    // and single-image mode are explicit because ffmpeg can't infer them from `.part`.
+    let temp_path = thumb_dir.join(format!("{filename}.part"));
     let output = run_with_timeout(
         Command::new("ffmpeg")
             .args([
@@ -42,24 +47,32 @@ pub fn generate_thumbnail(app: &AppHandle, video_path: &str) -> Option<String> {
                 "1",
                 "-q:v",
                 "2",
+                "-f",
+                "image2",
+                "-c:v",
+                "mjpeg",
+                "-update",
+                "1",
                 "-y",
-                output_path.to_str()?,
+                temp_path.to_str()?,
             ])
             .stderr(Stdio::null()),
         THUMBNAIL_TIMEOUT,
     );
 
-    match output {
-        Ok(out) if out.status.success() && output_path.exists() => {
-            Some(output_path.to_string_lossy().to_string())
+    let finished = match output {
+        Ok(out) if out.status.success() && temp_path.exists() => {
+            fs::rename(&temp_path, &output_path)
+                .map_err(|e| format!("Failed to save thumbnail: {e}"))
         }
-        result => {
-            if let Err(e) = result {
-                eprintln!("No thumbnail for {video_path}: {e}");
-            }
-            // A killed ffmpeg may leave a partial JPEG, which the exists() check
-            // above would otherwise serve forever
-            let _ = fs::remove_file(&output_path);
+        Ok(_) => Err("ffmpeg failed".to_string()),
+        Err(e) => Err(e),
+    };
+    match finished {
+        Ok(()) => Some(output_path.to_string_lossy().to_string()),
+        Err(e) => {
+            eprintln!("No thumbnail for {video_path}: {e}");
+            let _ = fs::remove_file(&temp_path);
             None
         }
     }

@@ -98,6 +98,7 @@ fn sync_library(
     let mut seen_files: HashSet<String> = HashSet::new();
     let mut batch = UpsertBatch::new(conn);
     let mut skipped = 0usize;
+    let mut consecutive_failures = 0usize;
 
     for (index, file_path) in walk.files.iter().enumerate() {
         seen_files.insert(file_path.clone());
@@ -117,9 +118,21 @@ fn sync_library(
         // Upsert — preserves watch progress, only updates metadata. One bad file is
         // logged and skipped; it stays in `seen_files`, so reconciliation leaves its
         // existing row alone instead of deleting or hiding it.
-        if let Err(e) = batch.run(|tx| upsert_parsed(tx, file_path, stem, duration, thumb))? {
-            eprintln!("Skipping {file_path}: {e}");
-            skipped += 1;
+        match batch.run(|tx| upsert_parsed(tx, file_path, stem, duration, thumb))? {
+            Ok(()) => consecutive_failures = 0,
+            Err(e) => {
+                eprintln!("Skipping {file_path}: {e}");
+                skipped += 1;
+                consecutive_failures += 1;
+                // A read-only DB, a schema problem or a lock held past the busy timeout
+                // fails every row without rolling the transaction back: that's the
+                // whole scan failing, not bad files. Dropping `batch` rolls back.
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES {
+                    return Err(format!(
+                        "Failed to sync library: {consecutive_failures} consecutive files failed, last error: {e}"
+                    ));
+                }
+            }
         }
     }
     batch.commit()?;
@@ -132,6 +145,10 @@ fn sync_library(
         reconcile_unseen(&existing_files, &seen_files, walk, is_confirmed_gone);
     sync_missing_media(conn, &removed, &missing)
 }
+
+/// Per-file upsert failures in a row (no success in between) after which the scan
+/// gives up: past this point the database is failing, not individual files.
+const MAX_CONSECUTIVE_FAILURES: usize = 20;
 
 /// Max upserts per scan transaction, and how long one may stay open.
 /// Tests use a small batch so they cross several commit boundaries cheaply.
@@ -570,25 +587,101 @@ mod tests {
         assert_eq!(pos, 600);
     }
 
+    /// Walk `root`, then process its files in `order` (walkdir order is unspecified).
+    fn ordered_walk(root: &str, order: Vec<String>) -> ScanWalk {
+        let mut walk = collect_video_files(&[root.to_string()]);
+        let mut found = walk.files.clone();
+        let mut wanted = order.clone();
+        found.sort();
+        wanted.sort();
+        assert_eq!(found, wanted, "order must list every walked file once");
+        walk.files = order;
+        walk
+    }
+
     #[test]
     fn whole_transaction_rollback_still_fails_the_scan() {
         let tmp = TempDir::new("sync-bad-rollback");
-        tmp.file("Show/Show.S01E01.mkv");
-        tmp.file("Show/Show.S01E02.mkv");
-        tmp.file("Show/Show.S01E03.mkv");
-        tmp.file("Show/Show.S01E04.mkv");
-        tmp.file("Show/Bad.Show.S01E01.mkv");
+        let mut order: Vec<String> = (1..=4)
+            .map(|n| tmp.file(&format!("Show/Show.S01E{n:02}.mkv")))
+            .collect();
+        let bad = tmp.file("Show/Bad.Show.S01E05.mkv");
+        order.push(bad.clone());
         let conn = test_db();
-        let walk = collect_video_files(&[tmp.path("")]);
         scan(&conn, &[tmp.path("")]);
-        conn.execute("DELETE FROM media WHERE file_path GLOB '*/Bad.*'", [])
-            .unwrap();
 
-        // RAISE(ROLLBACK) drops the open batch, like a disk-full error would:
-        // carrying on would silently lose the batch's other rows.
-        fail_writes_to_bad_paths(&conn, "ROLLBACK");
-        let result = sync_library(&conn, &walk, |_, _, _| (0, None));
+        // Rescan with every file already known (no probe commits), the bad one
+        // last, so its RAISE(ROLLBACK) on UPDATE drops a batch holding the four
+        // earlier rows, like a disk-full error would. Carrying on would lose them.
+        conn.execute_batch(
+            "CREATE TRIGGER fail_bad_update BEFORE UPDATE ON media
+             WHEN NEW.file_path GLOB '*/Bad.*'
+             BEGIN SELECT RAISE(ROLLBACK, 'forced rollback'); END;",
+        )
+        .unwrap();
+        let walk = ordered_walk(&tmp.path(""), order);
+        let result = sync_library(&conn, &walk, |_, _, _| (999, None));
+
         assert!(result.is_err(), "{result:?}");
         assert!(conn.is_autocommit());
+        let rewritten: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media WHERE duration = 999", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rewritten, 0, "the batch's earlier rows were rolled back");
+    }
+
+    #[test]
+    fn scan_fails_when_every_write_fails() {
+        let tmp = TempDir::new("sync-all-fail");
+        for n in 1..=MAX_CONSECUTIVE_FAILURES + 5 {
+            tmp.file(&format!("Show/Show.S01E{n:02}.mkv"));
+        }
+        let conn = test_db();
+        // Stand-in for a read-only DB: every write fails, the transaction survives
+        conn.execute_batch(
+            "CREATE TRIGGER fail_all BEFORE INSERT ON media
+             BEGIN SELECT RAISE(ABORT, 'attempt to write a readonly database'); END;",
+        )
+        .unwrap();
+
+        let walk = collect_video_files(&[tmp.path("")]);
+        let err = sync_library(&conn, &walk, |_, _, _| (0, None)).unwrap_err();
+
+        assert!(err.contains("consecutive files failed"), "{err}");
+        assert!(err.contains("readonly"), "{err}");
+        assert!(conn.is_autocommit(), "open batch rolled back");
+        assert!(known(&conn).is_empty());
+    }
+
+    #[test]
+    fn scattered_bad_files_do_not_trip_the_failure_limit() {
+        let tmp = TempDir::new("sync-scattered");
+        let good: Vec<String> = (1..=60)
+            .map(|n| tmp.file(&format!("Show/Show.S01E{n:02}.mkv")))
+            .collect();
+        // One run just under the limit, plus single bad files spread through the walk
+        let run = MAX_CONSECUTIVE_FAILURES - 1;
+        let bad: Vec<String> = (1..=run + 6)
+            .map(|n| tmp.file(&format!("Show/Bad.Show.S02E{n:02}.mkv")))
+            .collect();
+        let conn = test_db();
+        fail_writes_to_bad_paths(&conn, "ABORT");
+
+        // Order: the run of bad files, then good files with a bad one after every 10th
+        let mut order: Vec<String> = bad[..run].to_vec();
+        let mut scattered = bad[run..].iter();
+        for (i, g) in good.iter().enumerate() {
+            order.push(g.clone());
+            if i % 10 == 9 {
+                order.extend(scattered.next().cloned());
+            }
+        }
+        order.extend(scattered.cloned());
+        let walk = ordered_walk(&tmp.path(""), order);
+        sync_library(&conn, &walk, |_, _, _| (0, None)).unwrap();
+
+        assert_eq!(visible(&conn), good);
     }
 }

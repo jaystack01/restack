@@ -199,7 +199,7 @@ media (
 - ffprobe duration + ffmpeg thumbnail run **only for files not already in the DB** (expensive).
 - `commands/scanner.rs::sync_library` does the upserts and reconciliation without an `AppHandle`; the command passes a closure that emits progress and probes new files.
 - `sync_library` commits upserts in batches (`UpsertBatch`: 500 rows or 1 s) and commits the open batch before probing each new file, so SQLite's write lock is never held across ffprobe/ffmpeg (the mpv tracker writes progress on its own connection during scans). The reconcile step runs afterwards in `sync_missing_media`'s own transaction, so don't call `sync_missing_media` while a batch is open: `unchecked_transaction` would nest.
-- Each upsert runs in a savepoint inside the open batch. A file whose upsert fails is rolled back on its own, logged (`Skipping <path>: …`) and skipped; the rest of the batch commits. It still counts as seen, so reconciliation never deletes or hides its existing row. Only batch-level failures (begin/commit, or SQLite abandoning the whole transaction, detected via `is_autocommit()`) abort the scan.
+- Each upsert runs in a savepoint inside the open batch. A file whose upsert fails is rolled back on its own, logged (`Skipping <path>: …`) and skipped; the rest of the batch commits. It still counts as seen, so reconciliation never deletes or hides its existing row. Only batch-level failures (begin/commit, or SQLite abandoning the whole transaction, detected via `is_autocommit()`) abort the scan, and so do `MAX_CONSECUTIVE_FAILURES` (20) per-file failures in a row with no success between them, so a read-only or broken DB still returns `Err`.
 - ffprobe and ffmpeg run through `utils/scanner.rs::run_with_timeout` (std only: stdout drained on a thread, `try_wait` polling). `FFPROBE_TIMEOUT` is 30 s and `THUMBNAIL_TIMEOUT` 60 s. On timeout the child is killed and reaped on a background thread, and the file gets duration 0 / no thumbnail (a per-file failure, logged).
 - After the scan, rows whose `file_path` wasn't seen are reconciled (`utils/scanner.rs::reconcile_unseen`, then `db::sync_missing_media`):
   - Only rows under a root that existed and was walked **this** scan are considered, minus subtrees that had walk errors. `scan_and_sync(root)` never touches rows outside `root`.
@@ -237,7 +237,7 @@ When adding a pattern, insert it at the right priority and think about false pos
 
 ### Thumbnails (`utils/thumbnail.rs`)
 
-- Saved to `$APPDATA/thumbnails/<uuid-v5(file_path)>.jpg`, frame at **00:00:15**.
+- Saved to `$APPDATA/thumbnails/<uuid-v5(file_path)>.jpg`, frame at **00:00:15**. ffmpeg (60 s timeout) writes `<uuid>.jpg.part`, which is renamed into place only on success and removed otherwise, so an existing `<uuid>.jpg` is always complete.
 - Served to the webview via the asset protocol (`convertFileSrc`). `tauri.conf.json` scopes it to `$HOME/.local/share/com.jay.restack/thumbnails/**` and the CSP allows `asset:`/`http://asset.localhost`. **Changing the app identifier breaks thumbnails** unless you update that scope too.
 
 ### Delete / restore
