@@ -1,12 +1,13 @@
 use crate::db::{
-    get_full_library, get_media_paths, init_schema, open_db, sync_missing_media, upsert_episode, upsert_movie,
-    upsert_other,
+    get_full_library, get_media_paths, init_schema, open_db, sync_missing_media, upsert_episode,
+    upsert_movie, upsert_other,
 };
 use crate::models::{AppState, LibraryResponse, ScanGuard};
 use crate::run_blocking;
 use crate::utils::parser::{parse_filename, ParsedMedia};
 use crate::utils::scanner::{
-    collect_video_files, discover_default_scan_roots, ScanWalk, get_duration, is_confirmed_gone, reconcile_unseen,
+    collect_video_files, discover_default_scan_roots, get_duration, is_confirmed_gone,
+    reconcile_unseen, ScanWalk,
 };
 
 use rusqlite::{Connection, Transaction};
@@ -66,7 +67,10 @@ fn scan_roots_and_sync(app: &AppHandle, roots: &[String]) -> Result<LibraryRespo
 
         // Only run ffmpeg / duration for new files (expensive)
         if is_new {
-            (get_duration(file_path).unwrap_or(0), crate::utils::thumbnail::generate_thumbnail(app, file_path))
+            (
+                get_duration(file_path).unwrap_or(0),
+                crate::utils::thumbnail::generate_thumbnail(app, file_path),
+            )
         } else {
             (0, None)
         }
@@ -110,7 +114,8 @@ fn sync_library(
     batch.commit()?;
 
     // Reconcile rows whose files weren't seen this scan (one transaction in db.rs)
-    let (removed, missing) = reconcile_unseen(&existing_files, &seen_files, walk, is_confirmed_gone);
+    let (removed, missing) =
+        reconcile_unseen(&existing_files, &seen_files, walk, is_confirmed_gone);
     sync_missing_media(conn, &removed, &missing)
 }
 
@@ -130,7 +135,12 @@ struct UpsertBatch<'c> {
 
 impl<'c> UpsertBatch<'c> {
     fn new(conn: &'c Connection) -> Self {
-        UpsertBatch { conn, tx: None, opened_at: Instant::now(), rows: 0 }
+        UpsertBatch {
+            conn,
+            tx: None,
+            opened_at: Instant::now(),
+            rows: 0,
+        }
     }
 
     /// Run `f` in the open batch (opening one if needed); commits once the batch is full or old.
@@ -158,7 +168,9 @@ impl<'c> UpsertBatch<'c> {
 
     fn commit(&mut self) -> Result<(), String> {
         match self.tx.take() {
-            Some(tx) => tx.commit().map_err(|e| format!("Failed to commit scan batch: {e}")),
+            Some(tx) => tx
+                .commit()
+                .map_err(|e| format!("Failed to commit scan batch: {e}")),
             None => Ok(()),
         }
     }
@@ -173,8 +185,12 @@ fn upsert_parsed(
 ) -> Result<(), String> {
     match parse_filename(stem) {
         ParsedMedia::Series(parsed) => upsert_episode(conn, file_path, &parsed, duration, thumb),
-        ParsedMedia::Movie { title, year } => upsert_movie(conn, file_path, &title, year, duration, thumb),
-        ParsedMedia::Other { raw_name } => upsert_other(conn, file_path, &raw_name, duration, thumb),
+        ParsedMedia::Movie { title, year } => {
+            upsert_movie(conn, file_path, &title, year, duration, thumb)
+        }
+        ParsedMedia::Other { raw_name } => {
+            upsert_other(conn, file_path, &raw_name, duration, thumb)
+        }
     }
 }
 
@@ -235,7 +251,11 @@ mod tests {
         let mut paths: Vec<String> = lib
             .series
             .iter()
-            .flat_map(|g| g.seasons.iter().flat_map(|s| s.episodes.iter().map(|e| e.file_path.clone())))
+            .flat_map(|g| {
+                g.seasons
+                    .iter()
+                    .flat_map(|s| s.episodes.iter().map(|e| e.file_path.clone()))
+            })
             .chain(lib.movies.iter().map(|m| m.file_path.clone()))
             .chain(lib.others.iter().map(|o| o.file_path.clone()))
             .collect();
@@ -244,7 +264,11 @@ mod tests {
     }
 
     fn known(conn: &Connection) -> Vec<String> {
-        let mut paths: Vec<String> = get_media_paths(conn).unwrap().into_iter().map(|(p, _)| p).collect();
+        let mut paths: Vec<String> = get_media_paths(conn)
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
         paths.sort();
         paths
     }
@@ -259,7 +283,11 @@ mod tests {
         let b = tmp.file("Show.S01E02.mkv");
         assert_eq!(scan(&conn, &[tmp.path("")]), vec![b]);
         let duration: i64 = conn
-            .query_row("SELECT duration FROM media WHERE file_path = ?1", [&a], |r| r.get(0))
+            .query_row(
+                "SELECT duration FROM media WHERE file_path = ?1",
+                [&a],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(duration, 1200);
     }
@@ -280,10 +308,17 @@ mod tests {
 
         // Replug
         fs::rename(tmp.0.join("offline"), tmp.0.join("media/disk")).unwrap();
-        assert!(scan(&conn, &[tmp.path("media")]).is_empty(), "no re-probe on return");
+        assert!(
+            scan(&conn, &[tmp.path("media")]).is_empty(),
+            "no re-probe on return"
+        );
         assert_eq!(visible(&conn), vec![ep.clone()]);
         let pos: i64 = conn
-            .query_row("SELECT last_position FROM media WHERE file_path = ?1", [&ep], |r| r.get(0))
+            .query_row(
+                "SELECT last_position FROM media WHERE file_path = ?1",
+                [&ep],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(pos, 600);
     }
@@ -380,7 +415,11 @@ mod tests {
         paths.sort();
         assert_eq!(visible(&conn), paths);
         let unprobed: i64 = conn
-            .query_row("SELECT COUNT(*) FROM media WHERE duration != 1200", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM media WHERE duration != 1200",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(unprobed, 0, "rescan must not clobber probed durations");
     }
@@ -411,7 +450,10 @@ mod tests {
             }
             probes += 1;
             player
-                .execute("INSERT OR REPLACE INTO app_state (key, value_text) VALUES ('probe', ?1)", [probes])
+                .execute(
+                    "INSERT OR REPLACE INTO app_state (key, value_text) VALUES ('probe', ?1)",
+                    [probes],
+                )
                 .expect("player write during probe");
             (1200, None)
         })

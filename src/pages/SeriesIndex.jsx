@@ -102,12 +102,12 @@ export default function SeriesIndex() {
               ? convertFileSrc(firstEp.thumbnailPath)
               : null;
             const watchedCount = show.seasons.reduce(
-              (acc, s) =>
-                acc + s.episodes.filter((ep) => ep.watched).length,
+              (acc, s) => acc + s.episodes.filter((ep) => ep.watched).length,
               0,
             );
 
-            const watchPercent = epCount > 0 ? (watchedCount / epCount) * 100 : 0;
+            const watchPercent =
+              epCount > 0 ? (watchedCount / epCount) * 100 : 0;
 
             return (
               <motion.button
@@ -152,7 +152,9 @@ export default function SeriesIndex() {
                       {show.displayName}
                     </h2>
                     <p className="text-xs text-zinc-400 mt-1">
-                      {show.seasons.length} Season{show.seasons.length !== 1 ? "s" : ""} · {epCount} Episode{epCount !== 1 ? "s" : ""}
+                      {show.seasons.length} Season
+                      {show.seasons.length !== 1 ? "s" : ""} · {epCount} Episode
+                      {epCount !== 1 ? "s" : ""}
                     </p>
                   </div>
                   {watchedCount === epCount && (

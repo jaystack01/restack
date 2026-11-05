@@ -18,14 +18,19 @@ function EpisodeGrid({
         const selected = selectedEpisodes.has(ep.filePath);
         const focused = focusedEpisodeId === ep.id;
         const playing = playingFilePath && ep.filePath === playingFilePath;
-        const imgUrl = ep.thumbnailPath ? convertFileSrc(ep.thumbnailPath) : null;
+        const imgUrl = ep.thumbnailPath
+          ? convertFileSrc(ep.thumbnailPath)
+          : null;
         const progressPercent =
           ep.duration > 0 && ep.lastPosition > 0 && !ep.watched
             ? Math.min((ep.lastPosition / ep.duration) * 100, 100)
             : 0;
 
         const dragIds = selectedEpisodes.has(ep.filePath)
-          ? episodes.filter((x) => selectedEpisodes.has(x.filePath)).map((x) => x.id).filter(Boolean)
+          ? episodes
+              .filter((x) => selectedEpisodes.has(x.filePath))
+              .map((x) => x.id)
+              .filter(Boolean)
           : [ep.id];
 
         return (
@@ -39,7 +44,7 @@ function EpisodeGrid({
             onDragStart={(e) => {
               e.dataTransfer.setData(
                 "text/plain",
-                JSON.stringify({ mediaIds: dragIds })
+                JSON.stringify({ mediaIds: dragIds }),
               );
             }}
             className={cn(
@@ -50,7 +55,7 @@ function EpisodeGrid({
                   ? "border-accent/60 bg-accent/5"
                   : focused
                     ? "border-accent/40 ring-1 ring-accent/20"
-                    : "border-border hover:border-border-hover hover:shadow-premium"
+                    : "border-border hover:border-border-hover hover:shadow-premium",
             )}
           >
             {playing && (
@@ -58,7 +63,7 @@ function EpisodeGrid({
                 Playing
               </span>
             )}
-            
+
             <div className="relative aspect-video rounded-lg overflow-hidden bg-black/40 mb-3 select-none">
               {imgUrl ? (
                 <img
@@ -83,15 +88,21 @@ function EpisodeGrid({
               {/* Progress fill */}
               {!ep.watched && progressPercent > 0 && (
                 <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40">
-                  <div className="h-full bg-accent transition-all duration-300" style={{ width: `${progressPercent}%` }} />
+                  <div
+                    className="h-full bg-accent transition-all duration-300"
+                    style={{ width: `${progressPercent}%` }}
+                  />
                 </div>
               )}
             </div>
 
-            <h3 className="text-xs font-semibold text-white line-clamp-1 group-hover:text-accent transition-colors duration-200" title={ep.fileName}>
+            <h3
+              className="text-xs font-semibold text-white line-clamp-1 group-hover:text-accent transition-colors duration-200"
+              title={ep.fileName}
+            >
               {ep.fileName}
             </h3>
-            
+
             <div className="mt-2 flex items-center justify-between">
               <span className="text-[10px] text-zinc-500 font-bold tracking-wider uppercase">
                 Episode {ep.episode}

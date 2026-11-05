@@ -7,7 +7,8 @@ function formatTime(seconds) {
   const s = Math.floor(seconds % 60);
   const m = Math.floor((seconds / 60) % 60);
   const h = Math.floor(seconds / 3600);
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  if (h > 0)
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
@@ -32,7 +33,10 @@ function EpisodeList({
             : 0;
 
         const dragIds = selectedEpisodes.has(ep.filePath)
-          ? episodes.filter((x) => selectedEpisodes.has(x.filePath)).map((x) => x.id).filter(Boolean)
+          ? episodes
+              .filter((x) => selectedEpisodes.has(x.filePath))
+              .map((x) => x.id)
+              .filter(Boolean)
           : [ep.id];
 
         return (
@@ -47,7 +51,7 @@ function EpisodeList({
             onDragStart={(e) => {
               e.dataTransfer.setData(
                 "text/plain",
-                JSON.stringify({ mediaIds: dragIds })
+                JSON.stringify({ mediaIds: dragIds }),
               );
             }}
             className={cn(
@@ -58,7 +62,7 @@ function EpisodeList({
                   ? "border-accent/60 bg-accent/5"
                   : focused
                     ? "border-accent/40 ring-1 ring-accent/20"
-                    : "border-border bg-surface-card hover:bg-surface-hover hover:border-border-hover hover:shadow-premium"
+                    : "border-border bg-surface-card hover:bg-surface-hover hover:border-border-hover hover:shadow-premium",
             )}
           >
             {playing && (
@@ -69,13 +73,20 @@ function EpisodeList({
 
             <div className="flex items-center justify-between gap-4 w-full pr-12">
               <div className="flex items-center gap-2.5 min-w-0 flex-1">
-                <div className={cn(
-                  "p-1.5 rounded transition-colors duration-200",
-                  playing ? "bg-accent text-white" : "bg-zinc-800 text-zinc-500 group-hover:bg-accent group-hover:text-white"
-                )}>
+                <div
+                  className={cn(
+                    "p-1.5 rounded transition-colors duration-200",
+                    playing
+                      ? "bg-accent text-white"
+                      : "bg-zinc-800 text-zinc-500 group-hover:bg-accent group-hover:text-white",
+                  )}
+                >
                   <Play className="w-3.5 h-3.5 fill-current" />
                 </div>
-                <span className="text-sm font-semibold text-white truncate group-hover:text-accent transition-colors duration-200" title={ep.fileName}>
+                <span
+                  className="text-sm font-semibold text-white truncate group-hover:text-accent transition-colors duration-200"
+                  title={ep.fileName}
+                >
                   {ep.fileName}
                 </span>
               </div>
@@ -97,7 +108,10 @@ function EpisodeList({
               ) : (
                 progressPercent > 0 && (
                   <div className="flex-1 h-1 rounded-full bg-zinc-800 overflow-hidden relative shadow-inner">
-                    <div className="h-full bg-accent transition-all duration-300" style={{ width: `${progressPercent}%` }} />
+                    <div
+                      className="h-full bg-accent transition-all duration-300"
+                      style={{ width: `${progressPercent}%` }}
+                    />
                   </div>
                 )
               )}

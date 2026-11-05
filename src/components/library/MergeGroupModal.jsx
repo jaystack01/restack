@@ -4,7 +4,12 @@ import { GitMerge, X, AlertCircle } from "lucide-react";
 import { motion } from "framer-motion";
 import Button from "../ui/Button";
 
-export default function MergeGroupModal({ sourceGroupId, sourceDisplayName, onClose, onSuccess }) {
+export default function MergeGroupModal({
+  sourceGroupId,
+  sourceDisplayName,
+  onClose,
+  onSuccess,
+}) {
   const [groups, setGroups] = useState([]);
   const [selectedId, setSelectedId] = useState(null);
   const [loading, setLoading] = useState(false);
@@ -63,13 +68,21 @@ export default function MergeGroupModal({ sourceGroupId, sourceDisplayName, onCl
 
         <div className="flex items-center gap-3 text-accent mb-2">
           <GitMerge className="w-6 h-6 stroke-[2]" />
-          <h2 id="merge-title" className="text-lg font-bold text-white leading-none">
+          <h2
+            id="merge-title"
+            className="text-lg font-bold text-white leading-none"
+          >
             Merge Series Groups
           </h2>
         </div>
 
         <p className="text-xs text-zinc-400 leading-relaxed mb-5">
-          All episodes from <span className="text-white font-semibold">"{sourceDisplayName}"</span> will be relocated into the selected target group. This action is irreversible.
+          All episodes from{" "}
+          <span className="text-white font-semibold">
+            "{sourceDisplayName}"
+          </span>{" "}
+          will be relocated into the selected target group. This action is
+          irreversible.
         </p>
 
         {fetching ? (
@@ -88,13 +101,17 @@ export default function MergeGroupModal({ sourceGroupId, sourceDisplayName, onCl
                   onClick={() => setSelectedId(g.groupId)}
                   className={`
                     w-full text-left px-4 py-3 rounded-xl text-xs flex items-center justify-between gap-4 transition-all duration-200 cursor-pointer focus:outline-none
-                    ${selectedId === g.groupId
-                      ? "bg-accent/10 border border-accent/30 text-white font-semibold shadow-inner"
-                      : "hover:bg-surface-hover text-zinc-300 hover:text-white border border-transparent"}
+                    ${
+                      selectedId === g.groupId
+                        ? "bg-accent/10 border border-accent/30 text-white font-semibold shadow-inner"
+                        : "hover:bg-surface-hover text-zinc-300 hover:text-white border border-transparent"
+                    }
                   `}
                 >
                   <span className="truncate flex-1">{g.displayName}</span>
-                  <span className="text-zinc-500 font-bold shrink-0">{g.episodeCount} ep</span>
+                  <span className="text-zinc-500 font-bold shrink-0">
+                    {g.episodeCount} ep
+                  </span>
                 </button>
               </li>
             ))}

@@ -34,7 +34,11 @@ function TopSyncBar({ isSyncing, scanState }) {
             <motion.div
               className="h-full w-1/4 bg-accent"
               animate={{ x: ["-100%", "500%"] }}
-              transition={{ duration: 1.4, repeat: Infinity, ease: "easeInOut" }}
+              transition={{
+                duration: 1.4,
+                repeat: Infinity,
+                ease: "easeInOut",
+              }}
             />
           )}
         </motion.div>
@@ -43,7 +47,13 @@ function TopSyncBar({ isSyncing, scanState }) {
   );
 }
 
-function MainLayout({ children, onSync, isSyncing, scanState, hasLibraryLoaded }) {
+function MainLayout({
+  children,
+  onSync,
+  isSyncing,
+  scanState,
+  hasLibraryLoaded,
+}) {
   return (
     <div className="flex w-screen h-screen overflow-hidden bg-bg text-text-primary select-none">
       {/* App-wide sync progress strip (for returning user syncs) */}
@@ -54,9 +64,7 @@ function MainLayout({ children, onSync, isSyncing, scanState, hasLibraryLoaded }
       <Sidebar onSync={onSync} isSyncing={isSyncing} scanState={scanState} />
 
       <main className="flex-1 overflow-y-auto p-8 bg-gradient-to-b from-bg to-surface-card/20 scroll-smooth">
-        <div className="max-w-7xl mx-auto space-y-6">
-          {children}
-        </div>
+        <div className="max-w-7xl mx-auto space-y-6">{children}</div>
       </main>
 
       {/* Full-screen overlay — shown only until a library is available (empty DB on first scan) */}

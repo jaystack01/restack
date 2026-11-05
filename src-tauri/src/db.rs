@@ -1,4 +1,7 @@
-use crate::models::{ContinueWatchingItem, Episode, GroupInfo, LibraryResponse, MergeSuggestion, MovieItem, OtherItem, ParsedEpisode, SeasonGroup, ShowGroup};
+use crate::models::{
+    ContinueWatchingItem, Episode, GroupInfo, LibraryResponse, MergeSuggestion, MovieItem,
+    OtherItem, ParsedEpisode, SeasonGroup, ShowGroup,
+};
 use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::BTreeMap;
 use std::fs;
@@ -89,8 +92,10 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
     }
 
     if !existing_cols.iter().any(|c| c == "media_type") {
-        conn.execute_batch("ALTER TABLE media ADD COLUMN media_type TEXT NOT NULL DEFAULT 'series';")
-            .map_err(|e| format!("Failed to add media_type column: {e}"))?;
+        conn.execute_batch(
+            "ALTER TABLE media ADD COLUMN media_type TEXT NOT NULL DEFAULT 'series';",
+        )
+        .map_err(|e| format!("Failed to add media_type column: {e}"))?;
     }
 
     if !existing_cols.iter().any(|c| c == "year") {
@@ -175,10 +180,14 @@ pub fn migrate_existing_groups(conn: &Connection) -> Result<(), String> {
 
     let rows: Vec<(i64, String)> = {
         let mut stmt = tx
-            .prepare("SELECT id, show_name FROM media WHERE group_id IS NULL AND media_type = 'series'")
+            .prepare(
+                "SELECT id, show_name FROM media WHERE group_id IS NULL AND media_type = 'series'",
+            )
             .map_err(|e| format!("Failed to prepare migration query: {e}"))?;
         let collected = stmt
-            .query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)))
+            .query_map([], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })
             .map_err(|e| format!("Failed to read migration rows: {e}"))?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|e| format!("Failed to read migration rows: {e}"))?;
@@ -205,7 +214,8 @@ pub fn migrate_existing_groups(conn: &Connection) -> Result<(), String> {
     )
     .map_err(|e| format!("Failed to clean up phantom groups: {e}"))?;
 
-    tx.commit().map_err(|e| format!("Failed to commit group migration: {e}"))
+    tx.commit()
+        .map_err(|e| format!("Failed to commit group migration: {e}"))
 }
 
 // ---------------------------------------------------------------------------
@@ -347,7 +357,7 @@ pub fn get_grouped_library(conn: &Connection) -> Result<Vec<ShowGroup>, String> 
     let rows = stmt
         .query_map([], |row| {
             Ok((
-                row.get::<_, i64>(0)?,            // id
+                row.get::<_, i64>(0)?,             // id
                 row.get::<_, String>(1)?,          // file_path
                 row.get::<_, i64>(2)?,             // group_id
                 row.get::<_, String>(3)?,          // display_name
@@ -365,11 +375,23 @@ pub fn get_grouped_library(conn: &Connection) -> Result<Vec<ShowGroup>, String> 
     let mut grouped: BTreeMap<(i64, String), BTreeMap<u32, Vec<Episode>>> = BTreeMap::new();
 
     for row in rows {
-        let (id, file_path, group_id, display_name, season, episode, title, last_position, watched, duration, thumbnail_path) =
-            row.map_err(|e| format!("Failed to map query row: {e}"))?;
+        let (
+            id,
+            file_path,
+            group_id,
+            display_name,
+            season,
+            episode,
+            title,
+            last_position,
+            watched,
+            duration,
+            thumbnail_path,
+        ) = row.map_err(|e| format!("Failed to map query row: {e}"))?;
 
         let season_u32 = u32::try_from(season).map_err(|_| "Invalid season value".to_string())?;
-        let episode_u32 = u32::try_from(episode).map_err(|_| "Invalid episode value".to_string())?;
+        let episode_u32 =
+            u32::try_from(episode).map_err(|_| "Invalid episode value".to_string())?;
 
         let item = Episode {
             id,
@@ -397,7 +419,11 @@ pub fn get_grouped_library(conn: &Connection) -> Result<Vec<ShowGroup>, String> 
         for (season, episodes) in seasons_map {
             seasons.push(SeasonGroup { season, episodes });
         }
-        response.push(ShowGroup { group_id, display_name, seasons });
+        response.push(ShowGroup {
+            group_id,
+            display_name,
+            seasons,
+        });
     }
 
     Ok(response)
@@ -414,52 +440,63 @@ pub fn get_full_library(conn: &Connection) -> Result<LibraryResponse, String> {
              ORDER BY show_name COLLATE NOCASE"
         ).map_err(|e| format!("Failed to prepare movies query: {e}"))?;
 
-        let collected: Vec<MovieItem> = stmt.query_map([], |row| {
-            Ok(MovieItem {
-                id: row.get(0)?,
-                file_path: row.get(1)?,
-                title: row.get(2)?,
-                year: row.get::<_, Option<i64>>(3)?.map(|y| y as u32),
-                last_position: row.get(4)?,
-                watched: row.get::<_, i64>(5)? != 0,
-                duration: row.get(6)?,
-                thumbnail_path: row.get(7)?,
+        let collected: Vec<MovieItem> = stmt
+            .query_map([], |row| {
+                Ok(MovieItem {
+                    id: row.get(0)?,
+                    file_path: row.get(1)?,
+                    title: row.get(2)?,
+                    year: row.get::<_, Option<i64>>(3)?.map(|y| y as u32),
+                    last_position: row.get(4)?,
+                    watched: row.get::<_, i64>(5)? != 0,
+                    duration: row.get(6)?,
+                    thumbnail_path: row.get(7)?,
+                })
             })
-        })
-        .map_err(|e| format!("Failed to read movie rows: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
+            .map_err(|e| format!("Failed to read movie rows: {e}"))?
+            .filter_map(|r| r.ok())
+            .collect();
         collected
     };
 
     // Others
-    let others: Vec<OtherItem> = {
-        let mut stmt = conn.prepare(
+    let others: Vec<OtherItem> =
+        {
+            let mut stmt = conn.prepare(
             "SELECT id, file_path, show_name, last_position, watched, duration, thumbnail_path
              FROM media WHERE media_type = 'other' AND deleted_at IS NULL AND missing_since IS NULL
              ORDER BY show_name COLLATE NOCASE"
         ).map_err(|e| format!("Failed to prepare others query: {e}"))?;
 
-        let collected: Vec<OtherItem> = stmt.query_map([], |row| {
-            let file_path: String = row.get(1)?;
-            let file_name = file_path.rsplit('/').next().unwrap_or(&file_path).to_string();
-            Ok(OtherItem {
-                id: row.get(0)?,
-                file_path,
-                file_name,
-                last_position: row.get(3)?,
-                watched: row.get::<_, i64>(4)? != 0,
-                duration: row.get(5)?,
-                thumbnail_path: row.get(6)?,
-            })
-        })
-        .map_err(|e| format!("Failed to read other rows: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
-        collected
-    };
+            let collected: Vec<OtherItem> = stmt
+                .query_map([], |row| {
+                    let file_path: String = row.get(1)?;
+                    let file_name = file_path
+                        .rsplit('/')
+                        .next()
+                        .unwrap_or(&file_path)
+                        .to_string();
+                    Ok(OtherItem {
+                        id: row.get(0)?,
+                        file_path,
+                        file_name,
+                        last_position: row.get(3)?,
+                        watched: row.get::<_, i64>(4)? != 0,
+                        duration: row.get(5)?,
+                        thumbnail_path: row.get(6)?,
+                    })
+                })
+                .map_err(|e| format!("Failed to read other rows: {e}"))?
+                .filter_map(|r| r.ok())
+                .collect();
+            collected
+        };
 
-    Ok(LibraryResponse { series, movies, others })
+    Ok(LibraryResponse {
+        series,
+        movies,
+        others,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -493,17 +530,18 @@ pub fn merge_groups(conn: &Connection, source_id: i64, target_id: i64) -> Result
     )
     .map_err(|e| format!("Failed to move episodes during merge: {e}"))?;
 
-    conn.execute(
-        "DELETE FROM show_groups WHERE id = ?1",
-        params![source_id],
-    )
-    .map_err(|e| format!("Failed to delete source group: {e}"))?;
+    conn.execute("DELETE FROM show_groups WHERE id = ?1", params![source_id])
+        .map_err(|e| format!("Failed to delete source group: {e}"))?;
 
     Ok(())
 }
 
 /// Move specific episodes (by media.id) to a target group and mark them user_pinned.
-pub fn move_episodes(conn: &Connection, media_ids: &[i64], target_group_id: i64) -> Result<(), String> {
+pub fn move_episodes(
+    conn: &Connection,
+    media_ids: &[i64],
+    target_group_id: i64,
+) -> Result<(), String> {
     for &media_id in media_ids {
         conn.execute(
             "UPDATE media SET group_id = ?1, user_pinned = 1 WHERE id = ?2",
@@ -513,9 +551,14 @@ pub fn move_episodes(conn: &Connection, media_ids: &[i64], target_group_id: i64)
     }
     Ok(())
 }
- 
+
 /// Reclassify media files between 'series', 'movie', and 'other'.
-pub fn reclassify_media(conn: &Connection, media_ids: &[i64], target_type: &str, target_group_id: Option<i64>) -> Result<(), String> {
+pub fn reclassify_media(
+    conn: &Connection,
+    media_ids: &[i64],
+    target_type: &str,
+    target_group_id: Option<i64>,
+) -> Result<(), String> {
     for &media_id in media_ids {
         if target_type == "movie" {
             conn.execute(
@@ -531,11 +574,13 @@ pub fn reclassify_media(conn: &Connection, media_ids: &[i64], target_type: &str,
             .map_err(|e| format!("Failed to reclassify to other: {e}"))?;
         } else if target_type == "series" {
             if let Some(group_id) = target_group_id {
-                let current: (i64, i64) = conn.query_row(
-                    "SELECT season, episode FROM media WHERE id = ?1",
-                    params![media_id],
-                    |row| Ok((row.get(0)?, row.get(1)?))
-                ).unwrap_or((1, 0));
+                let current: (i64, i64) = conn
+                    .query_row(
+                        "SELECT season, episode FROM media WHERE id = ?1",
+                        params![media_id],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )
+                    .unwrap_or((1, 0));
 
                 let (season, episode) = current;
                 if season == 0 || episode == 0 {
@@ -647,7 +692,12 @@ pub fn get_merge_suggestions(conn: &Connection) -> Result<Vec<MergeSuggestion>, 
 // Progress helpers
 // ---------------------------------------------------------------------------
 
-pub fn update_progress(conn: &Connection, file_path: &str, last_position: i64, watched: bool) -> Result<(), String> {
+pub fn update_progress(
+    conn: &Connection,
+    file_path: &str,
+    last_position: i64,
+    watched: bool,
+) -> Result<(), String> {
     conn.execute(
         "
         UPDATE media
@@ -677,7 +727,10 @@ pub fn update_progress(conn: &Connection, file_path: &str, last_position: i64, w
 }
 
 /// `(last_position, duration, watched)` for a file, or `None` if it isn't indexed.
-pub fn get_playback_state(conn: &Connection, file_path: &str) -> Result<Option<(i64, i64, bool)>, String> {
+pub fn get_playback_state(
+    conn: &Connection,
+    file_path: &str,
+) -> Result<Option<(i64, i64, bool)>, String> {
     conn.query_row(
         "SELECT last_position, duration, watched FROM media WHERE file_path = ?1",
         params![file_path],
@@ -700,7 +753,8 @@ pub fn set_watched(conn: &Connection, media_ids: &[i64], watched: bool) -> Resul
         )
         .map_err(|e| format!("Failed to update watched state for media id {media_id}: {e}"))?;
     }
-    tx.commit().map_err(|e| format!("Failed to commit watched update: {e}"))
+    tx.commit()
+        .map_err(|e| format!("Failed to commit watched update: {e}"))
 }
 
 pub fn get_episode_meta(conn: &Connection, file_path: &str) -> Option<(i64, u32, u32)> {
@@ -717,7 +771,12 @@ pub fn get_episode_meta(conn: &Connection, file_path: &str) -> Option<(i64, u32,
     .ok()
 }
 
-pub fn get_next_episode(conn: &Connection, group_id: i64, season: u32, episode: u32) -> Option<String> {
+pub fn get_next_episode(
+    conn: &Connection,
+    group_id: i64,
+    season: u32,
+    episode: u32,
+) -> Option<String> {
     let mut stmt = conn
         .prepare(
             "
@@ -738,7 +797,9 @@ pub fn get_next_episode(conn: &Connection, group_id: i64, season: u32, episode: 
         .ok()
 }
 
-pub fn get_continue_watching_single(conn: &Connection) -> Result<Option<ContinueWatchingItem>, String> {
+pub fn get_continue_watching_single(
+    conn: &Connection,
+) -> Result<Option<ContinueWatchingItem>, String> {
     let last_id_text: Option<String> = conn
         .query_row(
             "SELECT value_text FROM app_state WHERE key = 'last_watched_episode_id'",
@@ -752,7 +813,10 @@ pub fn get_continue_watching_single(conn: &Connection) -> Result<Option<Continue
     };
 
     let Ok(last_id) = last_id_text.parse::<i64>() else {
-        let _ = conn.execute("DELETE FROM app_state WHERE key = 'last_watched_episode_id'", []);
+        let _ = conn.execute(
+            "DELETE FROM app_state WHERE key = 'last_watched_episode_id'",
+            [],
+        );
         return Ok(None);
     };
 
@@ -790,8 +854,18 @@ pub fn get_continue_watching_single(conn: &Connection) -> Result<Option<Continue
         },
     );
 
-    let Ok((_, display_name, file_path, season, episode, last_position, watched, duration, thumbnail_path, group_id)) =
-        current
+    let Ok((
+        _,
+        display_name,
+        file_path,
+        season,
+        episode,
+        last_position,
+        watched,
+        duration,
+        thumbnail_path,
+        group_id,
+    )) = current
     else {
         // Keep the pointer while the file is only temporarily missing (e.g. unplugged drive)
         let is_missing = conn
@@ -802,7 +876,10 @@ pub fn get_continue_watching_single(conn: &Connection) -> Result<Option<Continue
             )
             .unwrap_or(false);
         if !is_missing {
-            let _ = conn.execute("DELETE FROM app_state WHERE key = 'last_watched_episode_id'", []);
+            let _ = conn.execute(
+                "DELETE FROM app_state WHERE key = 'last_watched_episode_id'",
+                [],
+            );
         }
         return Ok(None);
     };
@@ -861,14 +938,24 @@ pub fn get_continue_watching_single(conn: &Connection) -> Result<Option<Continue
         },
     );
 
-    let Ok((next_display_name, next_file_path, next_season, next_episode, next_last_position, next_watched, next_duration, next_thumbnail_path)) =
-        next
+    let Ok((
+        next_display_name,
+        next_file_path,
+        next_season,
+        next_episode,
+        next_last_position,
+        next_watched,
+        next_duration,
+        next_thumbnail_path,
+    )) = next
     else {
         return Ok(None);
     };
 
-    let next_season_u32 = u32::try_from(next_season).map_err(|_| "Invalid next season value".to_string())?;
-    let next_episode_u32 = u32::try_from(next_episode).map_err(|_| "Invalid next episode value".to_string())?;
+    let next_season_u32 =
+        u32::try_from(next_season).map_err(|_| "Invalid next season value".to_string())?;
+    let next_episode_u32 =
+        u32::try_from(next_episode).map_err(|_| "Invalid next episode value".to_string())?;
     let up_next_type = if next_season == season {
         "next_episode"
     } else {
@@ -921,7 +1008,9 @@ pub fn get_media_paths(conn: &Connection) -> Result<Vec<(String, bool)>, String>
         .prepare("SELECT file_path, deleted_at IS NOT NULL FROM media")
         .map_err(|e| format!("Failed to prepare media paths query: {e}"))?;
     let rows = stmt
-        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)))
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?))
+        })
         .map_err(|e| format!("Failed to query media paths: {e}"))?;
     rows.collect::<Result<Vec<_>, _>>()
         .map_err(|e| format!("Failed to read media paths: {e}"))
@@ -929,7 +1018,11 @@ pub fn get_media_paths(conn: &Connection) -> Result<Vec<(String, bool)>, String>
 
 /// Hard-delete rows whose files are confirmed gone, and hide rows whose storage
 /// may only be unavailable (keeps progress / pinning until the file reappears).
-pub fn sync_missing_media(conn: &Connection, removed: &[String], missing: &[String]) -> Result<(), String> {
+pub fn sync_missing_media(
+    conn: &Connection,
+    removed: &[String],
+    missing: &[String],
+) -> Result<(), String> {
     let tx = conn
         .unchecked_transaction()
         .map_err(|e| format!("Failed to start missing-media transaction: {e}"))?;
@@ -948,7 +1041,6 @@ pub fn sync_missing_media(conn: &Connection, removed: &[String], missing: &[Stri
         .map_err(|e| format!("Failed to commit missing-media changes: {e}"))
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -960,12 +1052,21 @@ mod tests {
     }
 
     fn ep(show: &str, season: u32, episode: u32) -> ParsedEpisode {
-        ParsedEpisode { show_name: show.to_string(), season, episode, title: None }
+        ParsedEpisode {
+            show_name: show.to_string(),
+            season,
+            episode,
+            title: None,
+        }
     }
 
     fn row<T: rusqlite::types::FromSql>(conn: &Connection, file_path: &str, col: &str) -> T {
-        conn.query_row(&format!("SELECT {col} FROM media WHERE file_path = ?1"), params![file_path], |r| r.get(0))
-            .expect("media row")
+        conn.query_row(
+            &format!("SELECT {col} FROM media WHERE file_path = ?1"),
+            params![file_path],
+            |r| r.get(0),
+        )
+        .expect("media row")
     }
 
     fn id_of(conn: &Connection, file_path: &str) -> i64 {
@@ -977,7 +1078,11 @@ mod tests {
         let mut paths: Vec<String> = lib
             .series
             .iter()
-            .flat_map(|g| g.seasons.iter().flat_map(|s| s.episodes.iter().map(|e| e.file_path.clone())))
+            .flat_map(|g| {
+                g.seasons
+                    .iter()
+                    .flat_map(|s| s.episodes.iter().map(|e| e.file_path.clone()))
+            })
             .chain(lib.movies.iter().map(|m| m.file_path.clone()))
             .chain(lib.others.iter().map(|o| o.file_path.clone()))
             .collect();
@@ -991,7 +1096,11 @@ mod tests {
         upsert_episode(&conn, "/v/a.s01e02.mkv", &ep("Show A", 1, 2), 100, None).unwrap();
         let target = find_or_create_group(&conn, "Other Show").unwrap();
         move_episodes(&conn, &[id_of(&conn, "/v/a.s01e02.mkv")], target).unwrap();
-        conn.execute("UPDATE media SET season = 3, episode = 7 WHERE file_path = '/v/a.s01e02.mkv'", []).unwrap();
+        conn.execute(
+            "UPDATE media SET season = 3, episode = 7 WHERE file_path = '/v/a.s01e02.mkv'",
+            [],
+        )
+        .unwrap();
 
         upsert_episode(&conn, "/v/a.s01e02.mkv", &ep("Show A", 1, 2), 0, None).unwrap();
 
@@ -1008,14 +1117,32 @@ mod tests {
 
         upsert_episode(&conn, "/v/x.s01e01.mkv", &ep("X", 1, 1), 0, None).unwrap();
 
-        assert_eq!(row::<String>(&conn, "/v/x.s01e01.mkv", "media_type"), "movie");
+        assert_eq!(
+            row::<String>(&conn, "/v/x.s01e01.mkv", "media_type"),
+            "movie"
+        );
     }
 
     #[test]
     fn rescan_does_not_clobber_duration_or_thumbnail() {
         let conn = test_db();
-        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 1200, Some("/t/a.jpg".into())).unwrap();
-        upsert_movie(&conn, "/v/m.2010.mkv", "M", Some(2010), 5400, Some("/t/m.jpg".into())).unwrap();
+        upsert_episode(
+            &conn,
+            "/v/a.s01e01.mkv",
+            &ep("A", 1, 1),
+            1200,
+            Some("/t/a.jpg".into()),
+        )
+        .unwrap();
+        upsert_movie(
+            &conn,
+            "/v/m.2010.mkv",
+            "M",
+            Some(2010),
+            5400,
+            Some("/t/m.jpg".into()),
+        )
+        .unwrap();
         upsert_other(&conn, "/v/o.mkv", "o", 30, Some("/t/o.jpg".into())).unwrap();
 
         upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 0, None).unwrap();
@@ -1028,7 +1155,11 @@ mod tests {
             ("/v/o.mkv", 30, "/t/o.jpg"),
         ] {
             assert_eq!(row::<i64>(&conn, path, "duration"), duration, "{path}");
-            assert_eq!(row::<String>(&conn, path, "thumbnail_path"), thumb, "{path}");
+            assert_eq!(
+                row::<String>(&conn, path, "thumbnail_path"),
+                thumb,
+                "{path}"
+            );
         }
     }
 
@@ -1050,13 +1181,24 @@ mod tests {
         upsert_movie(&conn, "/drive/m.2010.mkv", "M", Some(2010), 5400, None).unwrap();
         update_progress(&conn, "/drive/a.s01e01.mkv", 600, false).unwrap();
 
-        sync_missing_media(&conn, &[], &["/drive/a.s01e01.mkv".into(), "/drive/m.2010.mkv".into()]).unwrap();
+        sync_missing_media(
+            &conn,
+            &[],
+            &["/drive/a.s01e01.mkv".into(), "/drive/m.2010.mkv".into()],
+        )
+        .unwrap();
         assert!(library_paths(&conn).is_empty());
 
         upsert_episode(&conn, "/drive/a.s01e01.mkv", &ep("A", 1, 1), 0, None).unwrap();
         upsert_movie(&conn, "/drive/m.2010.mkv", "M", Some(2010), 0, None).unwrap();
-        assert_eq!(library_paths(&conn), vec!["/drive/a.s01e01.mkv", "/drive/m.2010.mkv"]);
-        assert_eq!(row::<i64>(&conn, "/drive/a.s01e01.mkv", "last_position"), 600);
+        assert_eq!(
+            library_paths(&conn),
+            vec!["/drive/a.s01e01.mkv", "/drive/m.2010.mkv"]
+        );
+        assert_eq!(
+            row::<i64>(&conn, "/drive/a.s01e01.mkv", "last_position"),
+            600
+        );
     }
 
     #[test]
@@ -1064,7 +1206,11 @@ mod tests {
         let conn = test_db();
         upsert_other(&conn, "/drive/o.mkv", "o", 10, None).unwrap();
         sync_missing_media(&conn, &[], &["/drive/o.mkv".into()]).unwrap();
-        conn.execute("UPDATE media SET missing_since = 1 WHERE file_path = '/drive/o.mkv'", []).unwrap();
+        conn.execute(
+            "UPDATE media SET missing_since = 1 WHERE file_path = '/drive/o.mkv'",
+            [],
+        )
+        .unwrap();
 
         sync_missing_media(&conn, &[], &["/drive/o.mkv".into()]).unwrap();
 
@@ -1079,7 +1225,11 @@ mod tests {
 
         sync_missing_media(&conn, &["/v/gone.mkv".into()], &[]).unwrap();
 
-        let paths: Vec<String> = get_media_paths(&conn).unwrap().into_iter().map(|(p, _)| p).collect();
+        let paths: Vec<String> = get_media_paths(&conn)
+            .unwrap()
+            .into_iter()
+            .map(|(p, _)| p)
+            .collect();
         assert_eq!(paths, vec!["/v/kept.mkv"]);
     }
 
@@ -1090,11 +1240,17 @@ mod tests {
 
         mark_deleted(&conn, "/v/a.s01e01.mkv").unwrap();
         assert!(library_paths(&conn).is_empty());
-        assert_eq!(get_media_paths(&conn).unwrap(), vec![("/v/a.s01e01.mkv".to_string(), true)]);
+        assert_eq!(
+            get_media_paths(&conn).unwrap(),
+            vec![("/v/a.s01e01.mkv".to_string(), true)]
+        );
 
         mark_restored(&conn, "/v/a.s01e01.mkv").unwrap();
         assert_eq!(library_paths(&conn), vec!["/v/a.s01e01.mkv"]);
-        assert_eq!(get_media_paths(&conn).unwrap(), vec![("/v/a.s01e01.mkv".to_string(), false)]);
+        assert_eq!(
+            get_media_paths(&conn).unwrap(),
+            vec![("/v/a.s01e01.mkv".to_string(), false)]
+        );
     }
 
     #[test]
@@ -1107,7 +1263,9 @@ mod tests {
         assert!(get_continue_watching_single(&conn).unwrap().is_none());
 
         upsert_episode(&conn, "/drive/a.s01e01.mkv", &ep("A", 1, 1), 0, None).unwrap();
-        let item = get_continue_watching_single(&conn).unwrap().expect("pointer kept");
+        let item = get_continue_watching_single(&conn)
+            .unwrap()
+            .expect("pointer kept");
         assert_eq!(item.file_path, "/drive/a.s01e01.mkv");
         assert_eq!(item.last_position, 600);
     }
@@ -1147,7 +1305,10 @@ mod tests {
         migrate_existing_groups(&conn).unwrap();
 
         assert_eq!(row::<i64>(&conn, "/v/old.s01e01.mkv", "last_position"), 42);
-        assert_eq!(row::<String>(&conn, "/v/old.s01e01.mkv", "media_type"), "series");
+        assert_eq!(
+            row::<String>(&conn, "/v/old.s01e01.mkv", "media_type"),
+            "series"
+        );
         assert_eq!(row::<i64>(&conn, "/v/old.s01e01.mkv", "user_pinned"), 0);
         assert!(row::<Option<i64>>(&conn, "/v/old.s01e01.mkv", "missing_since").is_none());
         assert!(row::<Option<i64>>(&conn, "/v/old.s01e01.mkv", "group_id").is_some());
@@ -1198,7 +1359,10 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        assert!(plan.iter().any(|d| d.contains("idx_media_type_live")), "plan: {plan:?}");
+        assert!(
+            plan.iter().any(|d| d.contains("idx_media_type_live")),
+            "plan: {plan:?}"
+        );
     }
 
     #[test]
@@ -1208,18 +1372,32 @@ mod tests {
         upsert_other(&conn, "/v/o.mkv", "o", 30, None).unwrap();
         // State left by the old migration: a pinned "other" with a phantom group
         let phantom = find_or_create_group(&conn, "o").unwrap();
-        conn.execute("UPDATE media SET group_id = ?1, user_pinned = 1 WHERE file_path = '/v/o.mkv'", [phantom]).unwrap();
-        conn.execute("UPDATE media SET group_id = NULL WHERE file_path = '/v/a.s01e01.mkv'", []).unwrap();
+        conn.execute(
+            "UPDATE media SET group_id = ?1, user_pinned = 1 WHERE file_path = '/v/o.mkv'",
+            [phantom],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE media SET group_id = NULL WHERE file_path = '/v/a.s01e01.mkv'",
+            [],
+        )
+        .unwrap();
 
         migrate_existing_groups(&conn).unwrap();
 
         assert!(row::<Option<i64>>(&conn, "/v/o.mkv", "group_id").is_none());
         assert!(row::<Option<i64>>(&conn, "/v/a.s01e01.mkv", "group_id").is_some());
-        let groups: i64 = conn.query_row("SELECT COUNT(*) FROM show_groups", [], |r| r.get(0)).unwrap();
+        let groups: i64 = conn
+            .query_row("SELECT COUNT(*) FROM show_groups", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(groups, 1);
 
         // Second launch: a NULL series group stays NULL because the migration is done
-        conn.execute("UPDATE media SET group_id = NULL WHERE file_path = '/v/a.s01e01.mkv'", []).unwrap();
+        conn.execute(
+            "UPDATE media SET group_id = NULL WHERE file_path = '/v/a.s01e01.mkv'",
+            [],
+        )
+        .unwrap();
         migrate_existing_groups(&conn).unwrap();
         assert!(row::<Option<i64>>(&conn, "/v/a.s01e01.mkv", "group_id").is_none());
     }
@@ -1228,17 +1406,29 @@ mod tests {
     fn set_watched_is_bulk_and_keeps_continue_watching() {
         let conn = test_db();
         for e in 1..=3 {
-            upsert_episode(&conn, &format!("/v/a.s01e0{e}.mkv"), &ep("A", 1, e), 1200, None).unwrap();
+            upsert_episode(
+                &conn,
+                &format!("/v/a.s01e0{e}.mkv"),
+                &ep("A", 1, e),
+                1200,
+                None,
+            )
+            .unwrap();
         }
         update_progress(&conn, "/v/a.s01e02.mkv", 600, false).unwrap();
-        let ids = [id_of(&conn, "/v/a.s01e01.mkv"), id_of(&conn, "/v/a.s01e03.mkv")];
+        let ids = [
+            id_of(&conn, "/v/a.s01e01.mkv"),
+            id_of(&conn, "/v/a.s01e03.mkv"),
+        ];
 
         set_watched(&conn, &ids, true).unwrap();
 
         assert!(row::<bool>(&conn, "/v/a.s01e01.mkv", "watched"));
         assert!(row::<bool>(&conn, "/v/a.s01e03.mkv", "watched"));
         assert_eq!(row::<i64>(&conn, "/v/a.s01e01.mkv", "last_position"), 0);
-        let item = get_continue_watching_single(&conn).unwrap().expect("pointer");
+        let item = get_continue_watching_single(&conn)
+            .unwrap()
+            .expect("pointer");
         assert_eq!(item.file_path, "/v/a.s01e02.mkv");
 
         set_watched(&conn, &ids[..1], false).unwrap();
@@ -1251,7 +1441,10 @@ mod tests {
         upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 1200, None).unwrap();
         update_progress(&conn, "/v/a.s01e01.mkv", 1150, true).unwrap();
 
-        assert_eq!(get_playback_state(&conn, "/v/a.s01e01.mkv").unwrap(), Some((1150, 1200, true)));
+        assert_eq!(
+            get_playback_state(&conn, "/v/a.s01e01.mkv").unwrap(),
+            Some((1150, 1200, true))
+        );
         assert_eq!(get_playback_state(&conn, "/v/unknown.mkv").unwrap(), None);
     }
 
@@ -1274,13 +1467,23 @@ mod tests {
     fn next_episode_skips_unavailable_rows() {
         let conn = test_db();
         for e in 1..=4 {
-            upsert_episode(&conn, &format!("/v/a.s01e0{e}.mkv"), &ep("A", 1, e), 100, None).unwrap();
+            upsert_episode(
+                &conn,
+                &format!("/v/a.s01e0{e}.mkv"),
+                &ep("A", 1, e),
+                100,
+                None,
+            )
+            .unwrap();
         }
         let group: i64 = row(&conn, "/v/a.s01e01.mkv", "group_id");
         mark_deleted(&conn, "/v/a.s01e02.mkv").unwrap();
         sync_missing_media(&conn, &[], &["/v/a.s01e03.mkv".into()]).unwrap();
 
-        assert_eq!(get_next_episode(&conn, group, 1, 1).as_deref(), Some("/v/a.s01e04.mkv"));
+        assert_eq!(
+            get_next_episode(&conn, group, 1, 1).as_deref(),
+            Some("/v/a.s01e04.mkv")
+        );
     }
 
     #[test]
@@ -1292,7 +1495,9 @@ mod tests {
 
         update_progress(&conn, "/v/m.2010.mkv", 100, false).unwrap();
 
-        let item = get_continue_watching_single(&conn).unwrap().expect("series pointer kept");
+        let item = get_continue_watching_single(&conn)
+            .unwrap()
+            .expect("series pointer kept");
         assert_eq!(item.file_path, "/v/a.s01e01.mkv");
     }
 
@@ -1310,7 +1515,9 @@ mod tests {
         upsert_episode(&conn, "/v/showa.s01e03.mkv", &ep("Show A", 1, 3), 100, None).unwrap();
 
         assert_eq!(row::<i64>(&conn, "/v/showa.s01e03.mkv", "group_id"), target);
-        let groups: i64 = conn.query_row("SELECT COUNT(*) FROM show_groups", [], |r| r.get(0)).unwrap();
+        let groups: i64 = conn
+            .query_row("SELECT COUNT(*) FROM show_groups", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(groups, 1);
     }
 }

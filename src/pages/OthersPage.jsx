@@ -2,7 +2,12 @@ import { useEffect, useState } from "react";
 import { Search, FileVideo, Check, FolderOpen } from "lucide-react";
 import { motion } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
-import { getOthers, getPlayingFilePath, subscribe, subscribePlaying } from "../store/libraryStore";
+import {
+  getOthers,
+  getPlayingFilePath,
+  subscribe,
+  subscribePlaying,
+} from "../store/libraryStore";
 import Input from "../components/ui/Input";
 
 function formatDuration(seconds) {
@@ -17,7 +22,9 @@ function formatDuration(seconds) {
 export default function OthersPage() {
   const [others, setOthers] = useState(getOthers());
   const [search, setSearch] = useState("");
-  const [playingFilePath, setPlayingFilePath] = useState(() => getPlayingFilePath() ?? null);
+  const [playingFilePath, setPlayingFilePath] = useState(
+    () => getPlayingFilePath() ?? null,
+  );
 
   useEffect(() => {
     const unsub = subscribe(() => setOthers(getOthers()));
@@ -30,12 +37,17 @@ export default function OthersPage() {
   }, []);
 
   const filtered = search.trim()
-    ? others.filter((o) => o.fileName.toLowerCase().includes(search.trim().toLowerCase()))
+    ? others.filter((o) =>
+        o.fileName.toLowerCase().includes(search.trim().toLowerCase()),
+      )
     : others;
 
   async function playFile(item) {
     try {
-      await invoke("play_episode", { filePath: item.filePath, startSeconds: null });
+      await invoke("play_episode", {
+        filePath: item.filePath,
+        startSeconds: null,
+      });
     } catch {
       // silent
     }
@@ -69,7 +81,8 @@ export default function OthersPage() {
             Others
           </h1>
           <p className="text-sm text-zinc-400 mt-1">
-            Videos that couldn't be parsed into a specific series or movie pattern.
+            Videos that couldn't be parsed into a specific series or movie
+            pattern.
           </p>
         </div>
 
@@ -117,7 +130,7 @@ export default function OthersPage() {
                 onDragStart={(e) => {
                   e.dataTransfer.setData(
                     "text/plain",
-                    JSON.stringify({ mediaIds: [item.id] })
+                    JSON.stringify({ mediaIds: [item.id] }),
                   );
                 }}
                 key={item.id}
@@ -130,9 +143,13 @@ export default function OthersPage() {
                 onDoubleClick={() => playFile(item)}
               >
                 <div className="flex items-center gap-3.5 min-w-0 flex-1">
-                  <div className={`p-2.5 rounded-lg transition-colors duration-200 ${
-                    playing ? "bg-accent text-white" : "bg-zinc-800 text-zinc-400 group-hover:bg-accent group-hover:text-white"
-                  }`}>
+                  <div
+                    className={`p-2.5 rounded-lg transition-colors duration-200 ${
+                      playing
+                        ? "bg-accent text-white"
+                        : "bg-zinc-800 text-zinc-400 group-hover:bg-accent group-hover:text-white"
+                    }`}
+                  >
                     <FileVideo className="w-4 h-4" />
                   </div>
                   <div className="min-w-0 flex-1">
@@ -149,7 +166,7 @@ export default function OthersPage() {
                   <span className="text-xs text-zinc-400 font-semibold">
                     {formatDuration(item.duration)}
                   </span>
-                  
+
                   {item.watched && (
                     <span className="text-accent flex items-center gap-0.5 text-xs font-bold">
                       <Check className="w-3.5 h-3.5 stroke-[3]" />
@@ -164,7 +181,10 @@ export default function OthersPage() {
 
                   {!item.watched && progressPercent > 0 && (
                     <div className="w-16 h-1.5 rounded-full bg-zinc-800 overflow-hidden relative shadow-inner">
-                      <div className="h-full bg-accent transition-all duration-300" style={{ width: `${progressPercent}%` }} />
+                      <div
+                        className="h-full bg-accent transition-all duration-300"
+                        style={{ width: `${progressPercent}%` }}
+                      />
                     </div>
                   )}
                 </div>

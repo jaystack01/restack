@@ -15,12 +15,12 @@ pub fn get_thumbnail_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 
 pub fn generate_thumbnail(app: &AppHandle, video_path: &str) -> Option<String> {
     let thumb_dir = get_thumbnail_dir(app).ok()?;
-    
+
     // Create a stable hash based on file path to avoid duplicates
     let file_hash = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, video_path.as_bytes());
     let filename = format!("{}.jpg", file_hash);
     let output_path = thumb_dir.join(&filename);
-    
+
     // If it already exists, just return it
     if output_path.exists() {
         return Some(output_path.to_string_lossy().to_string());
@@ -28,12 +28,16 @@ pub fn generate_thumbnail(app: &AppHandle, video_path: &str) -> Option<String> {
 
     let status = Command::new("ffmpeg")
         .args([
-            "-ss", "00:00:15",
-            "-i", video_path,
-            "-frames:v", "1",
-            "-q:v", "2",
+            "-ss",
+            "00:00:15",
+            "-i",
+            video_path,
+            "-frames:v",
+            "1",
+            "-q:v",
+            "2",
             "-y",
-            output_path.to_str().unwrap()
+            output_path.to_str().unwrap(),
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())

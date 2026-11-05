@@ -3,7 +3,12 @@ import { invoke } from "@tauri-apps/api/core";
 import { useNavigate } from "react-router-dom";
 import { Tv, Film, Folder } from "lucide-react";
 import { motion } from "framer-motion";
-import { getSeries, getMovies, getOthers, subscribe } from "../store/libraryStore";
+import {
+  getSeries,
+  getMovies,
+  getOthers,
+  subscribe,
+} from "../store/libraryStore";
 import ContinueWatchingRow from "../components/library/ContinueWatchingRow";
 
 export default function Dashboard() {
@@ -98,8 +103,12 @@ export default function Dashboard() {
           <span className="text-3xl font-display font-extrabold tracking-tight text-white mt-4">
             {library.series.length}
           </span>
-          <span className="text-sm font-semibold text-zinc-300 mt-1">Series</span>
-          <span className="text-xs text-zinc-500 mt-0.5">{totalEpisodes} episodes indexed</span>
+          <span className="text-sm font-semibold text-zinc-300 mt-1">
+            Series
+          </span>
+          <span className="text-xs text-zinc-500 mt-0.5">
+            {totalEpisodes} episodes indexed
+          </span>
           <div className="absolute top-6 right-6 opacity-0 group-hover:opacity-100 text-accent text-xs font-semibold tracking-wider transition-opacity duration-300 uppercase">
             Browse →
           </div>
@@ -116,8 +125,12 @@ export default function Dashboard() {
           <span className="text-3xl font-display font-extrabold tracking-tight text-white mt-4">
             {library.movies.length}
           </span>
-          <span className="text-sm font-semibold text-zinc-300 mt-1">Movies</span>
-          <span className="text-xs text-zinc-500 mt-0.5">Standalone film catalogs</span>
+          <span className="text-sm font-semibold text-zinc-300 mt-1">
+            Movies
+          </span>
+          <span className="text-xs text-zinc-500 mt-0.5">
+            Standalone film catalogs
+          </span>
           <div className="absolute top-6 right-6 opacity-0 group-hover:opacity-100 text-accent text-xs font-semibold tracking-wider transition-opacity duration-300 uppercase">
             Browse →
           </div>
@@ -134,8 +147,12 @@ export default function Dashboard() {
           <span className="text-3xl font-display font-extrabold tracking-tight text-white mt-4">
             {library.others.length}
           </span>
-          <span className="text-sm font-semibold text-zinc-300 mt-1">Others</span>
-          <span className="text-xs text-zinc-500 mt-0.5">Unclassified media lists</span>
+          <span className="text-sm font-semibold text-zinc-300 mt-1">
+            Others
+          </span>
+          <span className="text-xs text-zinc-500 mt-0.5">
+            Unclassified media lists
+          </span>
           <div className="absolute top-6 right-6 opacity-0 group-hover:opacity-100 text-accent text-xs font-semibold tracking-wider transition-opacity duration-300 uppercase">
             Browse →
           </div>

@@ -31,7 +31,8 @@ function patchItems(items, filePath, lastPosition, watched) {
   const i = items.findIndex((item) => item.filePath === filePath);
   if (i === -1) return null;
   const item = items[i];
-  if (item.lastPosition === lastPosition && item.watched === watched) return items;
+  if (item.lastPosition === lastPosition && item.watched === watched)
+    return items;
   const next = items.slice();
   next[i] = { ...item, lastPosition, watched };
   return next;
@@ -44,7 +45,12 @@ function patchLibrary(library, filePath, lastPosition, watched) {
     const show = library.series[s];
     for (let k = 0; k < show.seasons.length; k++) {
       const season = show.seasons[k];
-      const episodes = patchItems(season.episodes, filePath, lastPosition, watched);
+      const episodes = patchItems(
+        season.episodes,
+        filePath,
+        lastPosition,
+        watched,
+      );
       if (!episodes) continue;
       if (episodes === season.episodes) return library;
       const seasons = show.seasons.slice();
@@ -68,7 +74,12 @@ function patchLibrary(library, filePath, lastPosition, watched) {
 export function updateEpisodeProgress(filePath, lastPosition, watched) {
   if (!cachedLibrary) return;
 
-  const newLibrary = patchLibrary(cachedLibrary, filePath, lastPosition, watched);
+  const newLibrary = patchLibrary(
+    cachedLibrary,
+    filePath,
+    lastPosition,
+    watched,
+  );
   if (newLibrary === cachedLibrary) return;
 
   cachedLibrary = newLibrary;

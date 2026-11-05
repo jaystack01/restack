@@ -1,7 +1,7 @@
 use serde::Serialize;
+use std::process::Child;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
-use std::process::Child;
 
 pub struct AppState {
     pub player_process: Mutex<Option<Child>>,

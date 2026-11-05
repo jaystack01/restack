@@ -8,7 +8,7 @@ export default function Tab({ active, className = "", ...props }) {
         active
           ? "bg-accent/10 border border-accent/30 text-white shadow-sm font-bold scale-[1.01]"
           : "bg-surface-card hover:bg-surface-hover text-zinc-400 hover:text-zinc-100 border border-border hover:border-border-hover shadow-sm",
-        className
+        className,
       )}
       {...props}
     />

@@ -6,7 +6,7 @@ export default function Select({ className = "", children, ...props }) {
       <select
         className={cn(
           "w-full appearance-none bg-surface-card hover:bg-surface-hover border border-border hover:border-border-hover rounded-lg px-3.5 pr-10 py-2 text-sm text-white transition-all duration-200 ease-out focus:outline-none focus:ring-2 focus:ring-accent/30 focus:border-accent shadow-sm cursor-pointer",
-          className
+          className,
         )}
         {...props}
       >

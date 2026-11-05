@@ -1,6 +1,14 @@
 import { NavLink, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
-import { Home, Tv, Film, Folder, RefreshCw, ChevronRight, CheckCircle2 } from "lucide-react";
+import {
+  Home,
+  Tv,
+  Film,
+  Folder,
+  RefreshCw,
+  ChevronRight,
+  CheckCircle2,
+} from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "../utils/cn";
 import { invoke } from "@tauri-apps/api/core";
@@ -65,7 +73,11 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
       {/* Brand Header */}
       <div className="p-6 pb-4">
         <div className="flex items-center gap-3">
-          <img src="/restack-icon-transparent.png" alt="Restack" className="w-8 h-8 object-cover" />
+          <img
+            src="/restack-icon-transparent.png"
+            alt="Restack"
+            className="w-8 h-8 object-cover"
+          />
           <h1 className="text-xl font-display font-extrabold bg-gradient-to-r from-accent to-accent-hover bg-clip-text text-transparent tracking-tight">
             Restack
           </h1>
@@ -83,7 +95,7 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
               "flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold border border-transparent transition-all duration-200",
               isActive
                 ? "bg-accent/10 text-white shadow-sm border-accent/20"
-                : "text-zinc-400 hover:text-zinc-100 hover:bg-surface-hover"
+                : "text-zinc-400 hover:text-zinc-100 hover:bg-surface-hover",
             )
           }
         >
@@ -99,7 +111,7 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
               "w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold transition-all duration-200",
               isSeriesDetail || location.pathname === "/series"
                 ? "text-white"
-                : "text-zinc-400 hover:text-zinc-100 hover:bg-surface-hover"
+                : "text-zinc-400 hover:text-zinc-100 hover:bg-surface-hover",
             )}
             onClick={() => setSeriesOpen((v) => !v)}
           >
@@ -111,7 +123,7 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
             <ChevronRight
               className={cn(
                 "w-4 h-4 text-zinc-500 transition-transform duration-200",
-                seriesOpen && "rotate-90"
+                seriesOpen && "rotate-90",
               )}
             />
           </button>
@@ -134,7 +146,7 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
                       "px-3 py-1.5 pl-7 rounded-md text-xs font-semibold border border-transparent transition-all duration-150",
                       isActive
                         ? "text-accent bg-accent/5 border-accent/10"
-                        : "text-zinc-500 hover:text-zinc-200 hover:bg-surface-hover"
+                        : "text-zinc-500 hover:text-zinc-200 hover:bg-surface-hover",
                     )
                   }
                 >
@@ -155,14 +167,17 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
                         setActiveDragTarget(`series-${show.groupId}`);
                       }}
                       onDragLeave={() => setActiveDragTarget(null)}
-                      onDrop={(e) => handleDropReclassify(e, "series", show.groupId)}
+                      onDrop={(e) =>
+                        handleDropReclassify(e, "series", show.groupId)
+                      }
                       className={({ isActive }) =>
                         cn(
                           "flex items-center justify-between px-3 py-1.5 pl-7 rounded-md text-xs font-semibold border transition-all duration-150 truncate",
                           isActive
                             ? "text-accent bg-accent/5 border-accent/10 font-bold"
                             : "text-zinc-500 hover:text-zinc-200 hover:bg-surface-hover border-transparent",
-                          activeDragTarget === `series-${show.groupId}` && "border-accent bg-accent/10 shadow-glow scale-[1.02] text-white border-solid"
+                          activeDragTarget === `series-${show.groupId}` &&
+                            "border-accent bg-accent/10 shadow-glow scale-[1.02] text-white border-solid",
                         )
                       }
                     >
@@ -196,7 +211,8 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
               isActive
                 ? "bg-accent/10 text-white shadow-sm border-accent/20"
                 : "text-zinc-400 hover:text-zinc-100 hover:bg-surface-hover border-transparent",
-              activeDragTarget === "movies" && "border-accent bg-accent/10 shadow-glow scale-[1.02] text-white border-solid"
+              activeDragTarget === "movies" &&
+                "border-accent bg-accent/10 shadow-glow scale-[1.02] text-white border-solid",
             )
           }
         >
@@ -225,7 +241,8 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
               isActive
                 ? "bg-accent/10 text-white shadow-sm border-accent/20"
                 : "text-zinc-400 hover:text-zinc-100 hover:bg-surface-hover border-transparent",
-              activeDragTarget === "others" && "border-accent bg-accent/10 shadow-glow scale-[1.02] text-white border-solid"
+              activeDragTarget === "others" &&
+                "border-accent bg-accent/10 shadow-glow scale-[1.02] text-white border-solid",
             )
           }
         >
@@ -241,14 +258,15 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
 
       {/* Sync / Progress Footer Panel */}
       <div className="p-4 border-t border-border bg-surface-card/40">
-
         {/* ── Scanning state: live progress ── */}
         {isSyncing && (
           <div className="space-y-2.5">
             {/* Header row */}
             <div className="flex items-center gap-2">
               <RefreshCw className="w-3.5 h-3.5 text-accent animate-spin shrink-0" />
-              <span className="text-xs font-semibold text-zinc-300">Scanning library…</span>
+              <span className="text-xs font-semibold text-zinc-300">
+                Scanning library…
+              </span>
               {scanState.total > 0 && (
                 <span className="ml-auto text-[10px] tabular-nums text-zinc-500 shrink-0">
                   {scanState.current} / {scanState.total}
@@ -261,7 +279,9 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
               {scanState.total > 0 ? (
                 <div
                   className="h-full rounded-full bg-accent transition-all duration-200 ease-out"
-                  style={{ width: `${Math.round((scanState.current / scanState.total) * 100)}%` }}
+                  style={{
+                    width: `${Math.round((scanState.current / scanState.total) * 100)}%`,
+                  }}
                 />
               ) : (
                 <div className="h-full w-1/3 rounded-full bg-accent/70 animate-sidebar-shimmer" />
@@ -279,7 +299,9 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
         {!isSyncing && scanState.phase === "done" && (
           <div className="flex items-center gap-2 px-3 py-2.5 rounded-lg bg-progress/10 border border-progress/20">
             <CheckCircle2 className="w-3.5 h-3.5 text-progress shrink-0" />
-            <span className="text-xs font-semibold text-zinc-300">Sync complete</span>
+            <span className="text-xs font-semibold text-zinc-300">
+              Sync complete
+            </span>
           </div>
         )}
 
@@ -294,7 +316,6 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
             <span>Sync Library</span>
           </button>
         )}
-
       </div>
     </aside>
   );

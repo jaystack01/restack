@@ -2,14 +2,21 @@ import { useEffect, useState } from "react";
 import { Search, Film, Play, Check } from "lucide-react";
 import { motion } from "framer-motion";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
-import { getMovies, getPlayingFilePath, subscribe, subscribePlaying } from "../store/libraryStore";
+import {
+  getMovies,
+  getPlayingFilePath,
+  subscribe,
+  subscribePlaying,
+} from "../store/libraryStore";
 import Input from "../components/ui/Input";
 import { cn } from "../utils/cn";
 
 export default function MoviesPage() {
   const [movies, setMovies] = useState(getMovies());
   const [search, setSearch] = useState("");
-  const [playingFilePath, setPlayingFilePath] = useState(() => getPlayingFilePath() ?? null);
+  const [playingFilePath, setPlayingFilePath] = useState(
+    () => getPlayingFilePath() ?? null,
+  );
 
   useEffect(() => {
     const unsub = subscribe(() => setMovies(getMovies()));
@@ -22,12 +29,17 @@ export default function MoviesPage() {
   }, []);
 
   const filtered = search.trim()
-    ? movies.filter((m) => m.title.toLowerCase().includes(search.trim().toLowerCase()))
+    ? movies.filter((m) =>
+        m.title.toLowerCase().includes(search.trim().toLowerCase()),
+      )
     : movies;
 
   async function playMovie(movie) {
     try {
-      await invoke("play_episode", { filePath: movie.filePath, startSeconds: null });
+      await invoke("play_episode", {
+        filePath: movie.filePath,
+        startSeconds: null,
+      });
     } catch {
       // silent
     }
@@ -104,7 +116,9 @@ export default function MoviesPage() {
           className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-6"
         >
           {filtered.map((movie) => {
-            const imgUrl = movie.thumbnailPath ? convertFileSrc(movie.thumbnailPath) : null;
+            const imgUrl = movie.thumbnailPath
+              ? convertFileSrc(movie.thumbnailPath)
+              : null;
             const playing = playingFilePath === movie.filePath;
             const progressPercent =
               movie.duration > 0 && movie.lastPosition > 0 && !movie.watched
@@ -118,12 +132,14 @@ export default function MoviesPage() {
                 onDragStart={(e) => {
                   e.dataTransfer.setData(
                     "text/plain",
-                    JSON.stringify({ mediaIds: [movie.id] })
+                    JSON.stringify({ mediaIds: [movie.id] }),
                   );
                 }}
                 whileHover={{
                   y: -4,
-                  borderColor: playing ? "var(--color-accent)" : "var(--color-border-hover)",
+                  borderColor: playing
+                    ? "var(--color-accent)"
+                    : "var(--color-border-hover)",
                   boxShadow: "var(--shadow-premium)",
                 }}
                 transition={{ type: "tween", ease: "easeOut", duration: 0.2 }}
@@ -131,7 +147,7 @@ export default function MoviesPage() {
                 type="button"
                 className={cn(
                   "group flex flex-col bg-surface-card border rounded-xl overflow-hidden cursor-pointer shadow-sm text-left focus:outline-none focus:ring-2 focus:ring-accent/35",
-                  playing ? "border-accent shadow-glow" : "border-border"
+                  playing ? "border-accent shadow-glow" : "border-border",
                 )}
                 onDoubleClick={() => playMovie(movie)}
               >
@@ -165,7 +181,10 @@ export default function MoviesPage() {
                   {/* Progress tracker */}
                   {!movie.watched && progressPercent > 0 && (
                     <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40">
-                      <div className="h-full bg-accent transition-all duration-300" style={{ width: `${progressPercent}%` }} />
+                      <div
+                        className="h-full bg-accent transition-all duration-300"
+                        style={{ width: `${progressPercent}%` }}
+                      />
                     </div>
                   )}
                 </div>

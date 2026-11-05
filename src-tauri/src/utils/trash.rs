@@ -25,7 +25,10 @@ pub fn restore_from_trash(file_path: &str) -> Result<(), String> {
 // `trash::delete` records the canonical path, so resolve symlinks in the parent dir
 fn resolve_original_path(file_path: &str) -> PathBuf {
     let path = Path::new(file_path);
-    match (path.parent().and_then(|p| p.canonicalize().ok()), path.file_name()) {
+    match (
+        path.parent().and_then(|p| p.canonicalize().ok()),
+        path.file_name(),
+    ) {
         (Some(parent), Some(name)) => parent.join(name),
         _ => path.to_path_buf(),
     }

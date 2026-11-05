@@ -1,4 +1,7 @@
-use crate::db::{get_continue_watching_single, get_full_library, init_schema, mark_deleted, mark_restored, open_db, reclassify_media};
+use crate::db::{
+    get_continue_watching_single, get_full_library, init_schema, mark_deleted, mark_restored,
+    open_db, reclassify_media,
+};
 use crate::models::{AppState, ContinueWatchingItem, LibraryResponse, ScanGuard};
 use crate::run_blocking;
 use crate::utils::trash::{move_to_trash, restore_from_trash};
@@ -29,7 +32,9 @@ pub async fn get_library_grouped(app: AppHandle) -> Result<LibraryResponse, Stri
 }
 
 #[tauri::command]
-pub async fn get_continue_watching_single_cmd(app: AppHandle) -> Result<Option<ContinueWatchingItem>, String> {
+pub async fn get_continue_watching_single_cmd(
+    app: AppHandle,
+) -> Result<Option<ContinueWatchingItem>, String> {
     run_blocking(move || {
         let conn = open_db(&app)?;
         init_schema(&conn)?;
@@ -100,7 +105,10 @@ mod tests {
             ran = true;
             Ok(())
         });
-        assert_eq!(res.err().as_deref(), Some("Failed to delete: a library scan is running"));
+        assert_eq!(
+            res.err().as_deref(),
+            Some("Failed to delete: a library scan is running")
+        );
         assert!(!ran);
         drop(scan);
 

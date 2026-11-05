@@ -14,7 +14,12 @@ export default function Checkbox({
   }, [indeterminate]);
 
   return (
-    <span className={cn("relative inline-flex items-center justify-center select-none", className)}>
+    <span
+      className={cn(
+        "relative inline-flex items-center justify-center select-none",
+        className,
+      )}
+    >
       <input
         ref={ref}
         type="checkbox"

@@ -6,7 +6,12 @@ import { invoke } from "@tauri-apps/api/core";
  * onClose()    — cancel, no changes
  * onSuccess()  — rename worked, parent should refresh library
  */
-export default function RenameGroupModal({ groupId, currentName, onClose, onSuccess }) {
+export default function RenameGroupModal({
+  groupId,
+  currentName,
+  onClose,
+  onSuccess,
+}) {
   const [value, setValue] = useState(currentName);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -19,7 +24,10 @@ export default function RenameGroupModal({ groupId, currentName, onClose, onSucc
   async function handleConfirm() {
     const trimmed = value.trim();
     if (!trimmed) return;
-    if (trimmed === currentName) { onClose(); return; }
+    if (trimmed === currentName) {
+      onClose();
+      return;
+    }
 
     setLoading(true);
     setError("");
@@ -46,7 +54,9 @@ export default function RenameGroupModal({ groupId, currentName, onClose, onSucc
         aria-modal="true"
         aria-labelledby="rename-title"
       >
-        <h2 id="rename-title" className="text-xl font-bold text-white mb-1">Rename Group</h2>
+        <h2 id="rename-title" className="text-xl font-bold text-white mb-1">
+          Rename Group
+        </h2>
         <p className="text-sm text-text-muted mb-5">
           Only the display name changes. Episode assignments stay intact.
         </p>
@@ -66,9 +76,7 @@ export default function RenameGroupModal({ groupId, currentName, onClose, onSucc
           "
         />
 
-        {error && (
-          <p className="text-red-400 text-xs mt-2">{error}</p>
-        )}
+        {error && <p className="text-red-400 text-xs mt-2">{error}</p>}
 
         <div className="flex gap-3 mt-6 justify-end">
           <button

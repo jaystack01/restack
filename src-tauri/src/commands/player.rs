@@ -26,7 +26,11 @@ struct ProgressPayload {
 }
 
 #[tauri::command]
-pub async fn set_watched_cmd(app: AppHandle, media_ids: Vec<i64>, watched: bool) -> Result<(), String> {
+pub async fn set_watched_cmd(
+    app: AppHandle,
+    media_ids: Vec<i64>,
+    watched: bool,
+) -> Result<(), String> {
     run_blocking(move || {
         let conn = open_db(&app)?;
         init_schema(&conn)?;
@@ -44,14 +48,23 @@ fn is_watched(previously_watched: bool, pos: f64, duration: f64) -> bool {
 /// replay should start from the beginning.
 fn resume_position(last_position: i64, duration: i64) -> u64 {
     let finished = duration > 0 && last_position as f64 >= duration as f64 * WATCHED_THRESHOLD;
-    if finished { 0 } else { last_position.max(0) as u64 }
+    if finished {
+        0
+    } else {
+        last_position.max(0) as u64
+    }
 }
 
 /// Throttle for progress writes. `last` is the `(position, watched)` last persisted
 /// (`None` = nothing yet). Writes when the watched flag flips (so crossing the
 /// threshold lands promptly), or when the position moved and either ≥ 5 s of
 /// position or ≥ 5 s of wall time passed since the last write.
-fn should_persist(last: Option<(i64, bool)>, pos: i64, watched: bool, since_last: Duration) -> bool {
+fn should_persist(
+    last: Option<(i64, bool)>,
+    pos: i64,
+    watched: bool,
+    since_last: Duration,
+) -> bool {
     let Some((last_pos, last_watched)) = last else {
         return true;
     };
@@ -64,7 +77,13 @@ fn should_persist(last: Option<(i64, bool)>, pos: i64, watched: bool, since_last
 }
 
 /// Write progress to the DB (if it opened) and tell the frontend.
-fn persist_progress(app: &AppHandle, conn: Option<&Connection>, file_path: &str, pos: i64, watched: bool) {
+fn persist_progress(
+    app: &AppHandle,
+    conn: Option<&Connection>,
+    file_path: &str,
+    pos: i64,
+    watched: bool,
+) {
     if let Some(conn) = conn {
         if let Err(e) = update_progress(conn, file_path, pos, watched) {
             println!("{e}");
@@ -98,7 +117,11 @@ fn stop_player(old_process: Option<Child>) {
     }
 }
 
-fn start_playback(app: AppHandle, file_path: String, start_seconds: Option<u64>) -> Result<(), String> {
+fn start_playback(
+    app: AppHandle,
+    file_path: String,
+    start_seconds: Option<u64>,
+) -> Result<(), String> {
     let state = app.state::<AppState>();
     let conn = open_db(&app)?;
     init_schema(&conn)?;
@@ -124,16 +147,25 @@ fn start_playback(app: AppHandle, file_path: String, start_seconds: Option<u64>)
     }
 
     // Only swap the Child under the lock; kill/wait and spawn happen outside it
-    let old_process = state.player_process.lock().ok().and_then(|mut lock| lock.take());
+    let old_process = state
+        .player_process
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.take());
     stop_player(old_process);
 
-    let child = cmd.spawn()
+    let child = cmd
+        .spawn()
         .map_err(|e| format!("Failed to start mpv: {}", e))?;
 
     // A concurrent play_episode may have stored its mpv meanwhile: the newest wins
-    let raced = state.player_process.lock().ok().and_then(|mut lock| lock.replace(child));
+    let raced = state
+        .player_process
+        .lock()
+        .ok()
+        .and_then(|mut lock| lock.replace(child));
     stop_player(raced);
-    
+
     // Notify frontend
     let _ = app.emit("video_playback_started", file_path.clone());
 
@@ -148,7 +180,12 @@ fn start_playback(app: AppHandle, file_path: String, start_seconds: Option<u64>)
     Ok(())
 }
 
-fn track_progress(app: AppHandle, socket_path: String, file_path: String, previously_watched: bool) {
+fn track_progress(
+    app: AppHandle,
+    socket_path: String,
+    file_path: String,
+    previously_watched: bool,
+) {
     println!("IPC connecting to {}", socket_path);
 
     // wait for mpv socket
@@ -207,8 +244,11 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String, previo
                     if event == "property-change" {
                         let name = json.get("name").and_then(|v| v.as_str()).unwrap_or("");
                         if name == "pause" {
-                            let paused = json.get("data").and_then(|v| v.as_bool()).unwrap_or(false);
-                            if let (true, Some((pos, watched))) = (paused && current != persisted, current) {
+                            let paused =
+                                json.get("data").and_then(|v| v.as_bool()).unwrap_or(false);
+                            if let (true, Some((pos, watched))) =
+                                (paused && current != persisted, current)
+                            {
                                 persist_progress(&app, conn.as_ref(), &file_path, pos, watched);
                                 persisted = current;
                                 persisted_at = Instant::now();
@@ -225,8 +265,19 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String, previo
                             watched_latched = is_watched(watched_latched, pos, duration);
                             let pos = pos as i64;
                             current = Some((pos, watched_latched));
-                            if should_persist(persisted, pos, watched_latched, persisted_at.elapsed()) {
-                                persist_progress(&app, conn.as_ref(), &file_path, pos, watched_latched);
+                            if should_persist(
+                                persisted,
+                                pos,
+                                watched_latched,
+                                persisted_at.elapsed(),
+                            ) {
+                                persist_progress(
+                                    &app,
+                                    conn.as_ref(),
+                                    &file_path,
+                                    pos,
+                                    watched_latched,
+                                );
                                 persisted = current;
                                 persisted_at = Instant::now();
                             }
@@ -241,8 +292,12 @@ fn track_progress(app: AppHandle, socket_path: String, file_path: String, previo
                             current = Some((0, true));
                             persisted = current;
                             if let Some(conn) = conn.as_ref() {
-                                if let Some((group_id, season, episode)) = get_episode_meta(conn, &file_path) {
-                                    if let Some(next_path) = get_next_episode(conn, group_id, season, episode) {
+                                if let Some((group_id, season, episode)) =
+                                    get_episode_meta(conn, &file_path)
+                                {
+                                    if let Some(next_path) =
+                                        get_next_episode(conn, group_id, season, episode)
+                                    {
                                         println!("Next episode: {}", next_path);
                                         play_next_after_close = Some(next_path);
                                     } else {
@@ -292,7 +347,10 @@ mod tests {
         assert!(!is_watched(false, 100.0, 1000.0));
         assert!(is_watched(false, 900.0, 1000.0));
         assert!(is_watched(true, 5.0, 1000.0), "rewatching keeps it watched");
-        assert!(!is_watched(false, 0.0, 0.0), "unknown duration never counts as watched");
+        assert!(
+            !is_watched(false, 0.0, 0.0),
+            "unknown duration never counts as watched"
+        );
     }
 
     #[test]
@@ -300,24 +358,58 @@ mod tests {
         assert_eq!(resume_position(600, 1200), 600);
         assert_eq!(resume_position(1150, 1200), 0);
         assert_eq!(resume_position(0, 1200), 0);
-        assert_eq!(resume_position(300, 0), 300, "unknown duration resumes as saved");
+        assert_eq!(
+            resume_position(300, 0),
+            300,
+            "unknown duration resumes as saved"
+        );
         assert_eq!(resume_position(-5, 1200), 0);
     }
 
     #[test]
     fn persist_throttles_position_ticks() {
         let now = Duration::ZERO;
-        assert!(should_persist(None, 0, false, now), "first tick always writes");
-        assert!(!should_persist(Some((100, false)), 100, false, Duration::from_secs(60)), "no change, no write");
-        assert!(!should_persist(Some((100, false)), 103, false, Duration::from_secs(3)));
-        assert!(should_persist(Some((100, false)), 105, false, now), "5 s of position");
-        assert!(should_persist(Some((100, false)), 40, false, now), "seeking back counts too");
-        assert!(should_persist(Some((100, false)), 101, false, Duration::from_secs(5)), "5 s of wall time");
+        assert!(
+            should_persist(None, 0, false, now),
+            "first tick always writes"
+        );
+        assert!(
+            !should_persist(Some((100, false)), 100, false, Duration::from_secs(60)),
+            "no change, no write"
+        );
+        assert!(!should_persist(
+            Some((100, false)),
+            103,
+            false,
+            Duration::from_secs(3)
+        ));
+        assert!(
+            should_persist(Some((100, false)), 105, false, now),
+            "5 s of position"
+        );
+        assert!(
+            should_persist(Some((100, false)), 40, false, now),
+            "seeking back counts too"
+        );
+        assert!(
+            should_persist(Some((100, false)), 101, false, Duration::from_secs(5)),
+            "5 s of wall time"
+        );
     }
 
     #[test]
     fn persist_immediately_when_watched_flips() {
-        assert!(should_persist(Some((899, false)), 900, true, Duration::ZERO));
-        assert!(!should_persist(Some((900, true)), 901, true, Duration::ZERO));
+        assert!(should_persist(
+            Some((899, false)),
+            900,
+            true,
+            Duration::ZERO
+        ));
+        assert!(!should_persist(
+            Some((900, true)),
+            901,
+            true,
+            Duration::ZERO
+        ));
     }
 }

@@ -12,13 +12,13 @@ static BRACKET_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\[.*?\]|\(.*?\)").expect("valid bracket regex"));
 static PUNCTUATION_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[._-]+").expect("valid punctuation regex"));
-static SPACES_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("valid spaces regex"));
+static SPACES_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\s+").expect("valid spaces regex"));
 
 // Movie with year: "Inception 2010", "The Dark Knight 2008". Greedy, so the last
 // year-like token wins: "Blade Runner 2049 2017" is (Blade Runner 2049, 2017).
-static MOVIE_YEAR_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^(.+)\s+((?:19|20)\d{2})\b").expect("valid movie year regex")
-});
+static MOVIE_YEAR_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^(.+)\s+((?:19|20)\d{2})\b").expect("valid movie year regex"));
 // Parenthesised release year, read before clean_text strips brackets: "Title (2017)"
 static PAREN_YEAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"\(((?:19|20)\d{2})\)").expect("valid paren year regex"));
@@ -28,9 +28,12 @@ static PAREN_YEAR_RE: LazyLock<Regex> =
 static SERIES_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
     [
         // "S01E02", "S01 E02", multi-episode "S01E01E02" (episode = first)
-        Regex::new(r"(?i)^(.+?)\s*S(\d+)\s*E(\d+)(?:\s*E\d+)*(?:\s+(.+))?$").expect("valid primary regex"),
-        Regex::new(r"(?i)^(.+?)\s*\b(\d{1,2})x(\d{1,3})(?:\s+(.+))?$").expect("valid fallback regex"),
-        Regex::new(r"(?i)^(.+?)\s*Season\s*(\d+)\s*Episode\s*(\d+)(?:\s+(.+))?$").expect("valid fallback regex"),
+        Regex::new(r"(?i)^(.+?)\s*S(\d+)\s*E(\d+)(?:\s*E\d+)*(?:\s+(.+))?$")
+            .expect("valid primary regex"),
+        Regex::new(r"(?i)^(.+?)\s*\b(\d{1,2})x(\d{1,3})(?:\s+(.+))?$")
+            .expect("valid fallback regex"),
+        Regex::new(r"(?i)^(.+?)\s*Season\s*(\d+)\s*Episode\s*(\d+)(?:\s+(.+))?$")
+            .expect("valid fallback regex"),
     ]
 });
 
@@ -38,8 +41,9 @@ static SERIES_RES: LazyLock<[Regex; 3]> = LazyLock::new(|| {
 static SHOW_YEAR_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"^(.+?)\s+(?:19|20)\d{2}$").expect("valid show year regex"));
 
-static E_ONLY_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)^(.+?)\s+E(\d{1,3})(?:\s+(.+))?$").expect("valid E-only regex"));
+static E_ONLY_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(?i)^(.+?)\s+E(\d{1,3})(?:\s+(.+))?$").expect("valid E-only regex")
+});
 static LIGHT_CLEAN_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[._]+").expect("valid"));
 // "Name - 04" or "Name-04". A dash glued to a digit ("2024-05", "12-30") is a date or
 // time separator, not an episode marker, so the name must end in a non-digit or a space.
@@ -83,7 +87,9 @@ pub fn parse_filename(stem: &str) -> ParsedMedia {
     // --- Try movie patterns ---
     let cleaned = clean_text(stem);
     if cleaned.is_empty() || DATE_RE.is_match(stem) {
-        return ParsedMedia::Other { raw_name: stem.to_string() };
+        return ParsedMedia::Other {
+            raw_name: stem.to_string(),
+        };
     }
 
     // A parenthesised year is the release year; the title is everything before it
@@ -97,14 +103,20 @@ pub fn parse_filename(stem: &str) -> ParsedMedia {
 
     // Movie with year: "Inception 2010", "The Dark Knight 2008"
     if let Some(caps) = MOVIE_YEAR_RE.captures(&cleaned) {
-        let title = caps.get(1).map(|m| m.as_str().trim()).unwrap_or("").to_string();
+        let title = caps
+            .get(1)
+            .map(|m| m.as_str().trim())
+            .unwrap_or("")
+            .to_string();
         let year: Option<u32> = caps.get(2).and_then(|m| m.as_str().parse().ok());
         if !title.is_empty() {
             return ParsedMedia::Movie { title, year };
         }
     }
 
-    ParsedMedia::Other { raw_name: stem.to_string() }
+    ParsedMedia::Other {
+        raw_name: stem.to_string(),
+    }
 }
 
 /// Cleaned show name with a trailing year removed; a name that is only a year ("1923") stays.
@@ -149,9 +161,17 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
     if let Some(caps) = E_ONLY_RE.captures(&cleaned) {
         let show_name = series_show_name(caps.get(1)?.as_str());
         let episode = caps.get(2)?.as_str().parse::<u32>().ok()?;
-        let title = caps.get(3).map(|m| clean_text(m.as_str())).filter(|v| !v.is_empty());
+        let title = caps
+            .get(3)
+            .map(|m| clean_text(m.as_str()))
+            .filter(|v| !v.is_empty());
         if !show_name.is_empty() && episode > 0 {
-            return Some(ParsedEpisode { show_name, season: 1, episode, title });
+            return Some(ParsedEpisode {
+                show_name,
+                season: 1,
+                episode,
+                title,
+            });
         }
     }
 
@@ -165,9 +185,17 @@ fn try_parse_series(stem: &str) -> Option<ParsedEpisode> {
         let raw_name = caps.get(1).or_else(|| caps.get(2))?.as_str();
         let show_name = series_show_name(raw_name);
         let episode = caps.get(3)?.as_str().parse::<u32>().ok()?;
-        let title = caps.get(4).map(|m| clean_text(m.as_str())).filter(|v| !v.is_empty());
+        let title = caps
+            .get(4)
+            .map(|m| clean_text(m.as_str()))
+            .filter(|v| !v.is_empty());
         if !show_name.is_empty() && episode > 0 {
-            return Some(ParsedEpisode { show_name, season: 1, episode, title });
+            return Some(ParsedEpisode {
+                show_name,
+                season: 1,
+                episode,
+                title,
+            });
         }
     }
 
@@ -214,7 +242,10 @@ mod tests {
 
     #[test]
     fn clean_text_strips_brackets_punctuation_and_tags() {
-        assert_eq!(clean_text("[Group] Show.Name_(2020)-1080p.WEB-DL.x265"), "Show Name");
+        assert_eq!(
+            clean_text("[Group] Show.Name_(2020)-1080p.WEB-DL.x265"),
+            "Show Name"
+        );
         assert_eq!(clean_text("  a..b   c "), "a b c");
         assert_eq!(clean_text("[only tags] 1080p"), "");
     }
@@ -222,17 +253,26 @@ mod tests {
     #[test]
     fn parses_sxxexx() {
         check(&[
-            ("Breaking.Bad.S01E02.Gray.Matter.1080p.WEB-DL.x264", series("Breaking Bad", 1, 2, Some("Gray Matter"))),
+            (
+                "Breaking.Bad.S01E02.Gray.Matter.1080p.WEB-DL.x264",
+                series("Breaking Bad", 1, 2, Some("Gray Matter")),
+            ),
             ("the.office.s03e10", series("the office", 3, 10, None)),
             ("Show Name S10E100", series("Show Name", 10, 100, None)),
-            ("[Group] Show_Name_S02E05_[1080p]", series("Show Name", 2, 5, None)),
+            (
+                "[Group] Show_Name_S02E05_[1080p]",
+                series("Show Name", 2, 5, None),
+            ),
         ]);
     }
 
     #[test]
     fn parses_nxnn() {
         check(&[
-            ("Friends 1x05 The One Where", series("Friends", 1, 5, Some("The One Where"))),
+            (
+                "Friends 1x05 The One Where",
+                series("Friends", 1, 5, Some("The One Where")),
+            ),
             ("The.Simpsons.10x05", series("The Simpsons", 10, 5, None)),
         ]);
     }
@@ -240,15 +280,24 @@ mod tests {
     #[test]
     fn parses_season_episode_words() {
         check(&[
-            ("Show Name Season 2 Episode 3", series("Show Name", 2, 3, None)),
-            ("Show.Name.Season.1.Episode.12.Pilot", series("Show Name", 1, 12, Some("Pilot"))),
+            (
+                "Show Name Season 2 Episode 3",
+                series("Show Name", 2, 3, None),
+            ),
+            (
+                "Show.Name.Season.1.Episode.12.Pilot",
+                series("Show Name", 1, 12, Some("Pilot")),
+            ),
         ]);
     }
 
     #[test]
     fn parses_episode_only_as_season_one() {
         check(&[
-            ("Naruto E04 The Title", series("Naruto", 1, 4, Some("The Title"))),
+            (
+                "Naruto E04 The Title",
+                series("Naruto", 1, 4, Some("The Title")),
+            ),
             ("Some.Show.E12", series("Some Show", 1, 12, None)),
         ]);
     }
@@ -256,9 +305,15 @@ mod tests {
     #[test]
     fn parses_anime_dash_episode_as_season_one() {
         check(&[
-            ("[SubsPlease] Frieren - 04 (1080p) [ABCD1234]", series("Frieren", 1, 4, None)),
+            (
+                "[SubsPlease] Frieren - 04 (1080p) [ABCD1234]",
+                series("Frieren", 1, 4, None),
+            ),
             ("Show-07", series("Show", 1, 7, None)),
-            ("Some_Anime - 12 Finale", series("Some Anime", 1, 12, Some("Finale"))),
+            (
+                "Some_Anime - 12 Finale",
+                series("Some Anime", 1, 12, Some("Finale")),
+            ),
         ]);
     }
 
@@ -266,7 +321,10 @@ mod tests {
     fn bug38_four_digit_dash_episodes() {
         check(&[
             ("One_Piece_-_1071", series("One Piece", 1, 1071, None)),
-            ("[SubsPlease] Detective Conan - 1120 (1080p)", series("Detective Conan", 1, 1120, None)),
+            (
+                "[SubsPlease] Detective Conan - 1120 (1080p)",
+                series("Detective Conan", 1, 1120, None),
+            ),
             ("Show - 0999", series("Show", 1, 999, None)),
             // A year after the dash is not an episode.
             ("Show - 2019", movie("Show", 2019)),
@@ -329,11 +387,17 @@ mod tests {
             "Clip_2024-05-14_12-30",
         ] {
             let got = parse(stem);
-            assert!(!matches!(got, Got::Series(..)), "stem: {stem:?} parsed as {got:?}");
+            assert!(
+                !matches!(got, Got::Series(..)),
+                "stem: {stem:?} parsed as {got:?}"
+            );
         }
         // A date is not a release year either, so these stay Other rather than Movie.
         check(&[
-            ("Screencast from 2024-05-14 12-30-45", other("Screencast from 2024-05-14 12-30-45")),
+            (
+                "Screencast from 2024-05-14 12-30-45",
+                other("Screencast from 2024-05-14 12-30-45"),
+            ),
             ("OBS 2024-05-14 10-30-12", other("OBS 2024-05-14 10-30-12")),
         ]);
         // Dash episodes still parse when the dash isn't glued to a digit.
@@ -351,7 +415,10 @@ mod tests {
             ("Breaking.Bad.S01E01E02", series("Breaking Bad", 1, 1, None)),
             ("Doctor.Who.2005.S01E01", series("Doctor Who", 1, 1, None)),
             ("show.s01.e02", series("show", 1, 2, None)),
-            ("Show.S02E03-E04.Double.Bill.1080p", series("Show", 2, 3, Some("Double Bill"))),
+            (
+                "Show.S02E03-E04.Double.Bill.1080p",
+                series("Show", 2, 3, Some("Double Bill")),
+            ),
             ("Show S01 E02 Title", series("Show", 1, 2, Some("Title"))),
             ("Doctor.Who.2005.1x01", series("Doctor Who", 1, 1, None)),
             ("Show 2019 - 04", series("Show", 1, 4, None)),
@@ -367,10 +434,19 @@ mod tests {
     fn bug18_movie_year_prefers_release_year() {
         check(&[
             ("Blade Runner 2049 (2017)", movie("Blade Runner 2049", 2017)),
-            ("Blade.Runner.2049.2017.1080p", movie("Blade Runner 2049", 2017)),
+            (
+                "Blade.Runner.2049.2017.1080p",
+                movie("Blade Runner 2049", 2017),
+            ),
             ("The.Dark.Knight.(2008)", movie("The Dark Knight", 2008)),
-            ("[Grp] 2001 A Space Odyssey (1968) [1080p]", movie("2001 A Space Odyssey", 1968)),
-            ("2001.A.Space.Odyssey.1968.REMUX", movie("2001 A Space Odyssey", 1968)),
+            (
+                "[Grp] 2001 A Space Odyssey (1968) [1080p]",
+                movie("2001 A Space Odyssey", 1968),
+            ),
+            (
+                "2001.A.Space.Odyssey.1968.REMUX",
+                movie("2001 A Space Odyssey", 1968),
+            ),
             // No release year: the title's own year is still the best guess, as before.
             ("Blade.Runner.2049.1080p", movie("Blade Runner", 2049)),
             // A leading parenthesised year has no title before it, so the plain scan decides.

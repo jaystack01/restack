@@ -35,7 +35,12 @@ function MultiSelectBar({
           {selectedCount} Selected
         </div>
 
-        <Button type="button" onClick={onToggleSelectAll} size="sm" variant="secondary">
+        <Button
+          type="button"
+          onClick={onToggleSelectAll}
+          size="sm"
+          variant="secondary"
+        >
           {allInViewSelected ? "Unselect All" : "Select All"}
         </Button>
       </div>

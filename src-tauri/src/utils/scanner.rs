@@ -1,24 +1,29 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::fs;
 use walkdir::WalkDir;
 
 pub fn is_supported_video(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
-    matches!(ext.to_ascii_lowercase().as_str(), "mkv" | "mp4" | "avi" | "webm")
+    matches!(
+        ext.to_ascii_lowercase().as_str(),
+        "mkv" | "mp4" | "avi" | "webm"
+    )
 }
 
 pub fn get_duration(file_path: &str) -> Result<i64, String> {
     let output = Command::new("ffprobe")
         .args([
-            "-v", "quiet",
-            "-print_format", "json",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
             "-show_format",
-            file_path
+            file_path,
         ])
         .output()
         .map_err(|e| format!("Failed to run ffprobe: {}", e))?;
@@ -49,7 +54,10 @@ pub fn should_skip_dir(path: &Path) -> bool {
     };
 
     // `.Trash-<uid>` is the freedesktop trash on non-home drives
-    matches!(name, ".cache" | ".git" | "node_modules" | "target" | "dist" | "Trash") || name.starts_with(".Trash-")
+    matches!(
+        name,
+        ".cache" | ".git" | "node_modules" | "target" | "dist" | "Trash"
+    ) || name.starts_with(".Trash-")
 }
 
 pub fn discover_default_scan_roots() -> Vec<String> {
@@ -73,7 +81,7 @@ pub fn discover_default_scan_roots() -> Vec<String> {
             home_path
                 .file_name()
                 .and_then(|n| n.to_str())
-                .unwrap_or_default()
+                .unwrap_or_default(),
         );
 
         if media_user.exists() && media_user.is_dir() {
@@ -107,7 +115,11 @@ pub struct ScanWalk {
 }
 
 pub fn collect_video_files(roots: &[String]) -> ScanWalk {
-    let mut walk = ScanWalk { files: Vec::new(), walked_roots: Vec::new(), incomplete_dirs: Vec::new() };
+    let mut walk = ScanWalk {
+        files: Vec::new(),
+        walked_roots: Vec::new(),
+        incomplete_dirs: Vec::new(),
+    };
     for root in roots {
         let root_path = Path::new(root);
         if !root_path.exists() || !root_path.is_dir() {
@@ -122,7 +134,8 @@ pub fn collect_video_files(roots: &[String]) -> ScanWalk {
             let entry = match entry {
                 Ok(entry) => entry,
                 Err(err) => {
-                    walk.incomplete_dirs.push(err.path().unwrap_or(root_path).to_path_buf());
+                    walk.incomplete_dirs
+                        .push(err.path().unwrap_or(root_path).to_path_buf());
                     continue;
                 }
             };
@@ -223,8 +236,15 @@ pub(crate) mod tests {
 
     #[test]
     fn reconcile_ignores_rows_outside_walked_roots() {
-        let rows = existing(&[("/home/u/a.mkv", false), ("/media/u/disk/b.mkv", false), ("/home/u2/c.mkv", false)]);
-        let (removed, missing) = reconcile_unseen(&rows, &HashSet::new(), &walk_of(&["/home/u"], &[]), |_| true);
+        let rows = existing(&[
+            ("/home/u/a.mkv", false),
+            ("/media/u/disk/b.mkv", false),
+            ("/home/u2/c.mkv", false),
+        ]);
+        let (removed, missing) =
+            reconcile_unseen(&rows, &HashSet::new(), &walk_of(&["/home/u"], &[]), |_| {
+                true
+            });
         // "/home/u2" shares a string prefix with "/home/u" but isn't under it
         assert_eq!(removed, vec!["/home/u/a.mkv"]);
         assert!(missing.is_empty());
@@ -241,7 +261,12 @@ pub(crate) mod tests {
     #[test]
     fn reconcile_keeps_rows_under_unreadable_dirs() {
         let rows = existing(&[("/r/locked/a.mkv", false), ("/r/open/b.mkv", false)]);
-        let (removed, missing) = reconcile_unseen(&rows, &HashSet::new(), &walk_of(&["/r"], &["/r/locked"]), |_| false);
+        let (removed, missing) = reconcile_unseen(
+            &rows,
+            &HashSet::new(),
+            &walk_of(&["/r"], &["/r/locked"]),
+            |_| false,
+        );
         assert!(removed.is_empty());
         assert_eq!(missing, vec!["/r/open/b.mkv"]);
     }
@@ -250,7 +275,9 @@ pub(crate) mod tests {
     fn reconcile_splits_removed_and_missing() {
         let rows = existing(&[("/r/gone.mkv", false), ("/r/offline/x.mkv", false)]);
         let (removed, missing) =
-            reconcile_unseen(&rows, &HashSet::new(), &walk_of(&["/r"], &[]), |p| p == Path::new("/r/gone.mkv"));
+            reconcile_unseen(&rows, &HashSet::new(), &walk_of(&["/r"], &[]), |p| {
+                p == Path::new("/r/gone.mkv")
+            });
         assert_eq!(removed, vec!["/r/gone.mkv"]);
         assert_eq!(missing, vec!["/r/offline/x.mkv"]);
     }
@@ -262,8 +289,12 @@ pub(crate) mod tests {
         fs::create_dir_all(tmp.0.join("empty")).unwrap();
 
         assert!(is_confirmed_gone(Path::new(&tmp.path("full/deleted.mkv"))));
-        assert!(!is_confirmed_gone(Path::new(&tmp.path("empty/deleted.mkv"))));
-        assert!(!is_confirmed_gone(Path::new(&tmp.path("absent/deleted.mkv"))));
+        assert!(!is_confirmed_gone(Path::new(
+            &tmp.path("empty/deleted.mkv")
+        )));
+        assert!(!is_confirmed_gone(Path::new(
+            &tmp.path("absent/deleted.mkv")
+        )));
     }
 
     #[test]

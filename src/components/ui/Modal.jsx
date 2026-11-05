@@ -25,7 +25,7 @@ export default function Modal({ isOpen, onClose, children, className = "" }) {
             transition={{ type: "spring", duration: 0.35, bounce: 0.15 }}
             className={cn(
               "relative w-full max-w-lg bg-surface border border-border p-6 rounded-2xl shadow-premium z-10 overflow-hidden",
-              className
+              className,
             )}
           >
             {/* Close Button */}

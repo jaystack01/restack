@@ -3,14 +3,17 @@ pub mod db;
 pub mod models;
 pub mod utils;
 
-use crate::db::{init_schema, migrate_existing_groups, open_db};
-use crate::commands::scanner::{scan_user_storage, scan_and_sync, get_scan_roots};
-use crate::commands::library::{delete_episodes_cmd, get_continue_watching_single_cmd, get_library_grouped, restore_episodes_cmd, reclassify_media_cmd};
-use crate::commands::player::{set_watched_cmd, play_episode};
 use crate::commands::groups::{
-    rename_group_cmd, merge_groups_cmd, move_episodes_cmd,
-    get_all_groups_cmd, get_merge_suggestions_cmd,
+    get_all_groups_cmd, get_merge_suggestions_cmd, merge_groups_cmd, move_episodes_cmd,
+    rename_group_cmd,
 };
+use crate::commands::library::{
+    delete_episodes_cmd, get_continue_watching_single_cmd, get_library_grouped,
+    reclassify_media_cmd, restore_episodes_cmd,
+};
+use crate::commands::player::{play_episode, set_watched_cmd};
+use crate::commands::scanner::{get_scan_roots, scan_and_sync, scan_user_storage};
+use crate::db::{init_schema, migrate_existing_groups, open_db};
 use crate::models::AppState;
 use std::sync::atomic::AtomicBool;
 use std::sync::Mutex;
@@ -37,7 +40,7 @@ pub fn run() {
             let conn = open_db(app.handle())?;
             init_schema(&conn)?;
             migrate_existing_groups(&conn)?;
-            
+
             app.manage(AppState {
                 player_process: Mutex::new(None),
                 scan_running: AtomicBool::new(false),

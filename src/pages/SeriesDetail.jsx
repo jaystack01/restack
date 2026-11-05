@@ -1,7 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
-import { ArrowLeft, Edit2, Search, LayoutGrid, List, SlidersHorizontal, ChevronRight, Info, Undo2, AlertCircle } from "lucide-react";
+import {
+  ArrowLeft,
+  Edit2,
+  Search,
+  LayoutGrid,
+  List,
+  SlidersHorizontal,
+  ChevronRight,
+  Info,
+  Undo2,
+  AlertCircle,
+} from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import EpisodeGrid from "../components/library/EpisodeGrid";
 import EpisodeList from "../components/library/EpisodeList";
@@ -112,10 +123,7 @@ export default function SeriesDetail() {
   const groups = useMemo(() => {
     return shows.map((show) => ({
       ...show,
-      episodeCount: show.seasons.reduce(
-        (acc, s) => acc + s.episodes.length,
-        0,
-      ),
+      episodeCount: show.seasons.reduce((acc, s) => acc + s.episodes.length, 0),
     }));
   }, [shows]);
 
@@ -263,7 +271,10 @@ export default function SeriesDetail() {
     }
     event.preventDefault();
     try {
-      await invoke("play_episode", { filePath: ep.filePath, startSeconds: null });
+      await invoke("play_episode", {
+        filePath: ep.filePath,
+        startSeconds: null,
+      });
     } catch {
       setError("Failed to start playback.");
     }
@@ -415,7 +426,12 @@ export default function SeriesDetail() {
     function onKeyDown(e) {
       const key = e.key.toLowerCase();
       const activeTag = document.activeElement?.tagName?.toLowerCase();
-      if (activeTag === "input" || activeTag === "select" || activeTag === "textarea") return;
+      if (
+        activeTag === "input" ||
+        activeTag === "select" ||
+        activeTag === "textarea"
+      )
+        return;
 
       if ((e.ctrlKey || e.metaKey) && key === "a") {
         e.preventDefault();
@@ -438,26 +454,46 @@ export default function SeriesDetail() {
         let nextIndex = currentIndex;
         if (key === "arrowleft") nextIndex = Math.max(0, currentIndex - 1);
         if (key === "arrowright")
-          nextIndex = Math.min(visibleEpisodesOrdered.length - 1, currentIndex + 1);
+          nextIndex = Math.min(
+            visibleEpisodesOrdered.length - 1,
+            currentIndex + 1,
+          );
         if (key === "arrowup") nextIndex = Math.max(0, currentIndex - cols);
         if (key === "arrowdown")
-          nextIndex = Math.min(visibleEpisodesOrdered.length - 1, currentIndex + cols);
+          nextIndex = Math.min(
+            visibleEpisodesOrdered.length - 1,
+            currentIndex + cols,
+          );
         const target = visibleEpisodesOrdered[nextIndex];
         if (target) setFocusedEpisodeId(target.id);
         return;
       }
       if (key === "enter" && focusedEpisodeId) {
         e.preventDefault();
-        const target = visibleEpisodesOrdered.find((ep) => ep.id === focusedEpisodeId);
+        const target = visibleEpisodesOrdered.find(
+          (ep) => ep.id === focusedEpisodeId,
+        );
         if (target) onEpisodeDoubleClick(e, target);
         return;
       }
-      if (key === "w" && selectedEpisodes.size > 0) { e.preventDefault(); markSelectedWatched(); }
-      if (key === "u" && selectedEpisodes.size > 0) { e.preventDefault(); markSelectedUnwatched(); }
+      if (key === "w" && selectedEpisodes.size > 0) {
+        e.preventDefault();
+        markSelectedWatched();
+      }
+      if (key === "u" && selectedEpisodes.size > 0) {
+        e.preventDefault();
+        markSelectedUnwatched();
+      }
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [visibleEpisodePaths, visibleEpisodesOrdered, focusedEpisodeId, selectedEpisodes, viewMode]);
+  }, [
+    visibleEpisodePaths,
+    visibleEpisodesOrdered,
+    focusedEpisodeId,
+    selectedEpisodes,
+    viewMode,
+  ]);
 
   if (!selectedGroupData) return null;
 
@@ -487,9 +523,16 @@ export default function SeriesDetail() {
         <div className="flex items-center justify-between gap-4 p-4 rounded-xl bg-accent/5 border border-accent/20 text-white text-sm animate-in shadow-premium shadow-accent/5">
           <div className="flex items-center gap-2">
             <Info className="w-4 h-4 text-accent shrink-0" />
-            <span>{recentlyDeleted.filePaths.length} episode(s) moved to Trash.</span>
+            <span>
+              {recentlyDeleted.filePaths.length} episode(s) moved to Trash.
+            </span>
           </div>
-          <Button onClick={undoDelete} variant="primary" size="sm" className="flex items-center gap-1">
+          <Button
+            onClick={undoDelete}
+            variant="primary"
+            size="sm"
+            className="flex items-center gap-1"
+          >
             <Undo2 className="w-3.5 h-3.5" />
             <span>Undo</span>
           </Button>
@@ -539,7 +582,9 @@ export default function SeriesDetail() {
               </h2>
             )}
             <p className="text-sm text-zinc-400 mt-1">
-              {selectedGroupData.episodeCount} Episodes · {selectedGroupData.seasonCount} Season{selectedGroupData.seasonCount !== 1 ? "s" : ""}
+              {selectedGroupData.episodeCount} Episodes ·{" "}
+              {selectedGroupData.seasonCount} Season
+              {selectedGroupData.seasonCount !== 1 ? "s" : ""}
             </p>
           </div>
 
@@ -560,7 +605,9 @@ export default function SeriesDetail() {
                 type="button"
                 onClick={() => setViewMode("grid")}
                 className={`p-1.5 rounded-md transition-colors focus:outline-none ${
-                  viewMode === "grid" ? "bg-accent text-white" : "text-zinc-400 hover:text-zinc-100"
+                  viewMode === "grid"
+                    ? "bg-accent text-white"
+                    : "text-zinc-400 hover:text-zinc-100"
                 }`}
                 title="Grid layout view"
               >
@@ -570,7 +617,9 @@ export default function SeriesDetail() {
                 type="button"
                 onClick={() => setViewMode("list")}
                 className={`p-1.5 rounded-md transition-colors focus:outline-none ${
-                  viewMode === "list" ? "bg-accent text-white" : "text-zinc-400 hover:text-zinc-100"
+                  viewMode === "list"
+                    ? "bg-accent text-white"
+                    : "text-zinc-400 hover:text-zinc-100"
                 }`}
                 title="List layout view"
               >
@@ -618,9 +667,13 @@ export default function SeriesDetail() {
                           setSelectedEpisodes((prev) => {
                             const next = new Set(prev);
                             if (e.target.checked)
-                              season.episodes.forEach((ep) => next.add(ep.filePath));
+                              season.episodes.forEach((ep) =>
+                                next.add(ep.filePath),
+                              );
                             else
-                              season.episodes.forEach((ep) => next.delete(ep.filePath));
+                              season.episodes.forEach((ep) =>
+                                next.delete(ep.filePath),
+                              );
                             return next;
                           })
                         }
@@ -710,8 +763,12 @@ export default function SeriesDetail() {
           <h3 className="text-lg font-bold text-white">Delete Episodes</h3>
         </div>
         <p className="text-zinc-400 text-sm mb-6 leading-relaxed select-none">
-          Are you sure you want to delete <span className="text-white font-semibold">{pendingDeletePaths.length}</span> selected episode(s)?
-          They will be relocated to your operating system's Trash container.
+          Are you sure you want to delete{" "}
+          <span className="text-white font-semibold">
+            {pendingDeletePaths.length}
+          </span>{" "}
+          selected episode(s)? They will be relocated to your operating system's
+          Trash container.
         </p>
         <ul className="max-h-40 overflow-y-auto mb-6 -mt-3 space-y-1 text-xs text-zinc-300 select-none">
           {pendingDeletePaths.map((path) => (
@@ -721,7 +778,10 @@ export default function SeriesDetail() {
           ))}
         </ul>
         <div className="flex gap-2.5 justify-end">
-          <Button onClick={() => setDeleteConfirmOpen(false)} variant="secondary">
+          <Button
+            onClick={() => setDeleteConfirmOpen(false)}
+            variant="secondary"
+          >
             Cancel
           </Button>
           <Button onClick={confirmDelete} variant="danger">

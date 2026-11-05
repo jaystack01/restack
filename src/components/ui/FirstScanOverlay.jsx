@@ -43,14 +43,18 @@ export default function FirstScanOverlay({ scanState, isSyncing, visible }) {
             {/* Title + subtitle */}
             <div className="text-center">
               <h2 className="text-2xl font-display font-extrabold text-white tracking-tight">
-                {isPreparing ? "Starting up…" : hasTotal ? "Indexing your library" : "Scanning your library"}
+                {isPreparing
+                  ? "Starting up…"
+                  : hasTotal
+                    ? "Indexing your library"
+                    : "Scanning your library"}
               </h2>
               <p className="text-sm text-zinc-400 mt-1.5">
                 {isPreparing
                   ? "Preparing the scanner…"
                   : hasTotal
-                  ? `Processing ${total} files`
-                  : "Discovering media files…"}
+                    ? `Processing ${total} files`
+                    : "Discovering media files…"}
               </p>
             </div>
 

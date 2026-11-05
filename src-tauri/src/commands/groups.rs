@@ -1,6 +1,6 @@
 use crate::db::{
-    get_all_groups, get_merge_suggestions, init_schema, merge_groups, move_episodes,
-    open_db, rename_group,
+    get_all_groups, get_merge_suggestions, init_schema, merge_groups, move_episodes, open_db,
+    rename_group,
 };
 use crate::models::{GroupInfo, MergeSuggestion};
 use crate::run_blocking;

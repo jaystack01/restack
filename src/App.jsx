@@ -99,7 +99,10 @@ function App() {
       // Register scan listeners first (parallel), then start the scan
       const [unlistenStart, unlistenProgress] = await Promise.all([
         listen("scan:start", (event) => {
-          setScanState((prev) => ({ ...prev, total: event.payload.total_files }));
+          setScanState((prev) => ({
+            ...prev,
+            total: event.payload.total_files,
+          }));
         }),
         listen("scan:progress", (event) => {
           const { current, total, file_name } = event.payload;
@@ -119,7 +122,11 @@ function App() {
       try {
         const cached = await invoke("get_library_grouped");
         if (cancelled) return;
-        if (cached.series.length || cached.movies.length || cached.others.length) {
+        if (
+          cached.series.length ||
+          cached.movies.length ||
+          cached.others.length
+        ) {
           setLibrary(cached);
           setHasLibraryLoaded(true);
         }

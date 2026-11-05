@@ -7,7 +7,8 @@ function formatTime(seconds) {
   const s = Math.floor(seconds % 60);
   const m = Math.floor((seconds / 60) % 60);
   const h = Math.floor(seconds / 3600);
-  if (h > 0) return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  if (h > 0)
+    return `${h}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
@@ -20,7 +21,9 @@ function ContinueWatchingRow({ item, onResume }) {
 
   const imgUrl = item.thumbnailPath ? convertFileSrc(item.thumbnailPath) : null;
   const progressPercent =
-    item.duration > 0 ? Math.min((item.lastPosition / item.duration) * 100, 100) : 0;
+    item.duration > 0
+      ? Math.min((item.lastPosition / item.duration) * 100, 100)
+      : 0;
   const heading = item.mode === "up_next" ? "Up Next" : "Continue Watching";
   const subTag =
     item.mode === "up_next"
@@ -73,7 +76,10 @@ function ContinueWatchingRow({ item, onResume }) {
           {/* Bottom inline progress bar */}
           {item.mode === "continue" && (
             <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40">
-              <div className="h-full bg-accent transition-all duration-300" style={{ width: `${progressPercent}%` }} />
+              <div
+                className="h-full bg-accent transition-all duration-300"
+                style={{ width: `${progressPercent}%` }}
+              />
             </div>
           )}
         </div>
@@ -82,7 +88,8 @@ function ContinueWatchingRow({ item, onResume }) {
         <div className="p-6 flex flex-col justify-between flex-1 min-w-0">
           <div className="space-y-1">
             <span className="text-[10px] font-extrabold tracking-wider uppercase text-accent">
-              S{String(item.season).padStart(2, "0")}E{String(item.episode).padStart(2, "0")}
+              S{String(item.season).padStart(2, "0")}E
+              {String(item.episode).padStart(2, "0")}
             </span>
             <h3 className="text-base font-semibold text-white truncate leading-snug group-hover:text-accent transition-colors duration-200">
               {getFileName(item.filePath)}
