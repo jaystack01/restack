@@ -35,6 +35,12 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
         CREATE UNIQUE INDEX IF NOT EXISTS idx_show_groups_normalized
             ON show_groups(normalized_name);
 
+        -- Extra normalized names that resolve to a group (e.g. a merged-away source)
+        CREATE TABLE IF NOT EXISTS show_group_aliases (
+            normalized_name TEXT PRIMARY KEY,
+            group_id INTEGER NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS app_state (
             key TEXT PRIMARY KEY,
             value_text TEXT,
@@ -136,28 +142,46 @@ pub fn normalize_name(name: &str) -> String {
         .collect()
 }
 
-/// Look up an existing show group by normalized name, or create a new one.
-pub fn find_or_create_group(conn: &Connection, show_name: &str) -> Result<i64, String> {
+/// Resolve a show name to an existing group without creating one:
+/// an alias (e.g. a merged-away name) wins, then the group's own normalized name.
+pub fn find_group(conn: &Connection, show_name: &str) -> Result<Option<i64>, String> {
     let normalized = normalize_name(show_name);
 
-    let existing: rusqlite::Result<i64> = conn.query_row(
+    // Join so an alias left pointing at a deleted group is ignored
+    let aliased: Option<i64> = conn
+        .query_row(
+            "SELECT a.group_id FROM show_group_aliases a
+             JOIN show_groups sg ON sg.id = a.group_id
+             WHERE a.normalized_name = ?1",
+            params![normalized],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to query show_group_aliases: {e}"))?;
+    if aliased.is_some() {
+        return Ok(aliased);
+    }
+
+    conn.query_row(
         "SELECT id FROM show_groups WHERE normalized_name = ?1",
         params![normalized],
         |row| row.get(0),
-    );
+    )
+    .optional()
+    .map_err(|e| format!("Failed to query show_groups: {e}"))
+}
 
-    match existing {
-        Ok(id) => Ok(id),
-        Err(rusqlite::Error::QueryReturnedNoRows) => {
-            conn.execute(
-                "INSERT INTO show_groups (display_name, normalized_name) VALUES (?1, ?2)",
-                params![show_name, normalized],
-            )
-            .map_err(|e| format!("Failed to insert show group: {e}"))?;
-            Ok(conn.last_insert_rowid())
-        }
-        Err(e) => Err(format!("Failed to query show_groups: {e}")),
+/// Look up an existing show group (aliases first, then normalized name), or create a new one.
+pub fn find_or_create_group(conn: &Connection, show_name: &str) -> Result<i64, String> {
+    if let Some(id) = find_group(conn, show_name)? {
+        return Ok(id);
     }
+    conn.execute(
+        "INSERT INTO show_groups (display_name, normalized_name) VALUES (?1, ?2)",
+        params![show_name, normalize_name(show_name)],
+    )
+    .map_err(|e| format!("Failed to insert show group: {e}"))?;
+    Ok(conn.last_insert_rowid())
 }
 
 /// One-time startup migration: backfill `group_id` for series rows that lack one,
@@ -229,8 +253,26 @@ pub fn upsert_episode(
     duration: i64,
     thumbnail_path: Option<String>,
 ) -> Result<(), String> {
-    let group_id = find_or_create_group(conn, &parsed.show_name)?;
+    // Existing row's (group_id, user_pinned), if any
+    let existing: Option<(Option<i64>, bool)> = conn
+        .query_row(
+            "SELECT group_id, user_pinned != 0 FROM media WHERE file_path = ?1",
+            params![file_path],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read existing media row: {e}"))?;
 
+    // Resolve (or create) a group only for rows that need one. Doing it for every
+    // rescanned file would recreate groups that were merged away (BUG-13).
+    let current_group = existing.and_then(|(group_id, _)| group_id);
+    let group_id = match existing {
+        None | Some((None, false)) => Some(find_or_create_group(conn, &parsed.show_name)?),
+        Some((group_id, _)) => group_id,
+    };
+
+    // `?9` is the group seen above: the row only takes `excluded.group_id` if nothing
+    // changed it in between (pinned rows always keep theirs)
     conn.execute(
         "
         INSERT INTO media (file_path, show_name, season, episode, title, duration, thumbnail_path, group_id, media_type)
@@ -244,7 +286,7 @@ pub fn upsert_episode(
           thumbnail_path = COALESCE(excluded.thumbnail_path, media.thumbnail_path),
           group_id       = CASE
                              WHEN media.user_pinned = 1 THEN media.group_id
-                             WHEN media.group_id IS NULL THEN excluded.group_id
+                             WHEN media.group_id IS ?9 THEN COALESCE(excluded.group_id, media.group_id)
                              ELSE media.group_id
                            END,
           media_type     = CASE WHEN media.user_pinned = 1 THEN media.media_type ELSE 'series' END,
@@ -260,6 +302,7 @@ pub fn upsert_episode(
             duration,
             thumbnail_path,
             group_id,
+            current_group,
         ],
     )
     .map(|_| ())
@@ -519,21 +562,59 @@ pub fn rename_group(conn: &Connection, group_id: i64, new_name: &str) -> Result<
 }
 
 /// Move all episodes from source group → target group, then delete source.
+/// The source's normalized name (and any alias that pointed at it) becomes an alias
+/// of the target, so later scans file those names under the target.
 pub fn merge_groups(conn: &Connection, source_id: i64, target_id: i64) -> Result<(), String> {
     if source_id == target_id {
         return Err("Source and target groups must be different".to_string());
     }
 
-    conn.execute(
+    let tx = conn
+        .unchecked_transaction()
+        .map_err(|e| format!("Failed to start merge: {e}"))?;
+
+    let source_name: String = tx
+        .query_row(
+            "SELECT normalized_name FROM show_groups WHERE id = ?1",
+            params![source_id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| format!("Failed to read source group: {e}"))?
+        .ok_or_else(|| format!("No group found with id {source_id}"))?;
+    let target_exists: bool = tx
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM show_groups WHERE id = ?1)",
+            params![target_id],
+            |row| row.get(0),
+        )
+        .map_err(|e| format!("Failed to read target group: {e}"))?;
+    if !target_exists {
+        return Err(format!("No group found with id {target_id}"));
+    }
+
+    tx.execute(
         "UPDATE media SET group_id = ?1 WHERE group_id = ?2",
         params![target_id, source_id],
     )
     .map_err(|e| format!("Failed to move episodes during merge: {e}"))?;
 
-    conn.execute("DELETE FROM show_groups WHERE id = ?1", params![source_id])
+    tx.execute(
+        "UPDATE show_group_aliases SET group_id = ?1 WHERE group_id = ?2",
+        params![target_id, source_id],
+    )
+    .map_err(|e| format!("Failed to re-point aliases during merge: {e}"))?;
+    tx.execute(
+        "INSERT OR REPLACE INTO show_group_aliases (normalized_name, group_id) VALUES (?1, ?2)",
+        params![source_name, target_id],
+    )
+    .map_err(|e| format!("Failed to record merge alias: {e}"))?;
+
+    tx.execute("DELETE FROM show_groups WHERE id = ?1", params![source_id])
         .map_err(|e| format!("Failed to delete source group: {e}"))?;
 
-    Ok(())
+    tx.commit()
+        .map_err(|e| format!("Failed to commit merge: {e}"))
 }
 
 /// Move specific episodes (by media.id) to a target group and mark them user_pinned.
@@ -1448,9 +1529,6 @@ mod tests {
         assert_eq!(get_playback_state(&conn, "/v/unknown.mkv").unwrap(), None);
     }
 
-    // --- Open bugs: these document the expected behaviour and fail today.
-    // Remove the #[ignore] when fixing the referenced TODO item.
-
     #[test]
     fn movies_and_others_never_get_a_group() {
         let conn = test_db();
@@ -1502,7 +1580,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "BUG-13: merged groups resurrect and split new episodes"]
     fn merge_then_rescan_does_not_split() {
         let conn = test_db();
         upsert_episode(&conn, "/v/showa.s01e01.mkv", &ep("Show A", 1, 1), 100, None).unwrap();
@@ -1519,5 +1596,123 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM show_groups", [], |r| r.get(0))
             .unwrap();
         assert_eq!(groups, 1);
+    }
+
+    fn group_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM show_groups", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    fn alias_target(conn: &Connection, normalized: &str) -> Option<i64> {
+        conn.query_row(
+            "SELECT group_id FROM show_group_aliases WHERE normalized_name = ?1",
+            params![normalized],
+            |r| r.get(0),
+        )
+        .optional()
+        .unwrap()
+    }
+
+    #[test]
+    fn alias_resolves_before_normalized_name() {
+        let conn = test_db();
+        let target = find_or_create_group(&conn, "The Show").unwrap();
+        conn.execute(
+            "INSERT INTO show_group_aliases (normalized_name, group_id) VALUES ('theshowus', ?1)",
+            params![target],
+        )
+        .unwrap();
+
+        assert_eq!(find_group(&conn, "The.Show.US").unwrap(), Some(target));
+        assert_eq!(find_or_create_group(&conn, "the show us").unwrap(), target);
+        assert_eq!(find_group(&conn, "Unknown").unwrap(), None);
+        assert_eq!(group_count(&conn), 1);
+    }
+
+    #[test]
+    fn merge_records_and_repoints_aliases() {
+        let conn = test_db();
+        let a = find_or_create_group(&conn, "Show A").unwrap();
+        let b = find_or_create_group(&conn, "Show B").unwrap();
+        let c = find_or_create_group(&conn, "Show C").unwrap();
+
+        merge_groups(&conn, a, b).unwrap();
+        assert_eq!(alias_target(&conn, "showa"), Some(b));
+
+        // Merging B on into C carries A's alias along
+        merge_groups(&conn, b, c).unwrap();
+        assert_eq!(alias_target(&conn, "showa"), Some(c));
+        assert_eq!(alias_target(&conn, "showb"), Some(c));
+        assert_eq!(find_or_create_group(&conn, "Show A").unwrap(), c);
+        assert_eq!(group_count(&conn), 1);
+
+        assert!(merge_groups(&conn, a, c).is_err(), "source is gone");
+        assert!(merge_groups(&conn, c, 999).is_err(), "unknown target");
+    }
+
+    #[test]
+    fn rescan_does_not_recreate_merged_group_for_existing_rows() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("Show A", 1, 1), 100, None).unwrap();
+        upsert_episode(&conn, "/v/b.s01e01.mkv", &ep("Show B", 1, 1), 100, None).unwrap();
+        let a: i64 = row(&conn, "/v/a.s01e01.mkv", "group_id");
+        let b: i64 = row(&conn, "/v/b.s01e01.mkv", "group_id");
+        // Simulate a merge from before aliases existed: no alias row is left behind
+        conn.execute(
+            "UPDATE media SET group_id = ?1 WHERE group_id = ?2",
+            params![b, a],
+        )
+        .unwrap();
+        conn.execute("DELETE FROM show_groups WHERE id = ?1", params![a])
+            .unwrap();
+
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("Show A", 1, 1), 0, None).unwrap();
+
+        assert_eq!(row::<i64>(&conn, "/v/a.s01e01.mkv", "group_id"), b);
+        assert_eq!(group_count(&conn), 1);
+    }
+
+    #[test]
+    fn old_database_without_alias_table_opens() {
+        let conn = Connection::open_in_memory().unwrap();
+        // Schema from before show_group_aliases
+        conn.execute_batch(
+            "CREATE TABLE show_groups (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                display_name TEXT NOT NULL,
+                normalized_name TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX idx_show_groups_normalized ON show_groups(normalized_name);
+            CREATE TABLE media (
+                id INTEGER PRIMARY KEY,
+                file_path TEXT NOT NULL UNIQUE,
+                show_name TEXT NOT NULL,
+                season INTEGER NOT NULL,
+                episode INTEGER NOT NULL,
+                title TEXT,
+                duration INTEGER NOT NULL DEFAULT 0,
+                last_position INTEGER NOT NULL DEFAULT 0,
+                watched INTEGER NOT NULL DEFAULT 0,
+                thumbnail_path TEXT,
+                group_id INTEGER,
+                user_pinned INTEGER NOT NULL DEFAULT 0,
+                deleted_at INTEGER,
+                media_type TEXT NOT NULL DEFAULT 'series',
+                year INTEGER,
+                missing_since INTEGER
+            );
+            INSERT INTO show_groups (id, display_name, normalized_name) VALUES (7, 'Old', 'old');
+            INSERT INTO media (file_path, show_name, season, episode, group_id)
+            VALUES ('/v/old.s01e01.mkv', 'Old', 1, 1, 7);",
+        )
+        .unwrap();
+
+        init_schema(&conn).unwrap();
+        init_schema(&conn).unwrap(); // idempotent
+
+        assert_eq!(find_or_create_group(&conn, "Old").unwrap(), 7);
+        upsert_episode(&conn, "/v/old.s01e02.mkv", &ep("Old", 1, 2), 0, None).unwrap();
+        assert_eq!(row::<i64>(&conn, "/v/old.s01e02.mkv", "group_id"), 7);
+        assert_eq!(library_paths(&conn).len(), 2);
     }
 }

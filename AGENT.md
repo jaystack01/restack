@@ -161,6 +161,7 @@ src-tauri/src/
 
 ```sql
 show_groups (id PK AUTOINCREMENT, display_name TEXT, normalized_name TEXT UNIQUE)
+show_group_aliases (normalized_name TEXT PK, group_id INTEGER NOT NULL)  -- extra names that resolve to a group (merged-away sources, re-keyed old names)
 app_state   (key TEXT PK, value_text TEXT, updated_at INTEGER)   -- e.g. 'last_watched_episode_id'
 media (
   id INTEGER PK, file_path TEXT UNIQUE NOT NULL,
@@ -186,6 +187,9 @@ media (
 ### Grouping
 
 - `normalize_name()` = lowercase, alphanumerics only. `find_or_create_group()` keys on it, so `Show.Name` and `show name` collapse into one group.
+- `find_group()` (lookup only) checks `show_group_aliases` first (joined to live groups), then `show_groups.normalized_name`; `find_or_create_group()` creates a group only when both miss.
+- `merge_groups` runs in one transaction and errors on unknown ids: it moves the rows, re-points the source's aliases to the target, records the source's normalized name as an alias of the target (`INSERT OR IGNORE`), and deletes the source. Chains collapse onto the final target, so a merged-away name never recreates its group on rescan.
+- The scan upsert resolves (or creates) a group only for new rows or rows with a NULL `group_id`. Existing rows keep their group; the write uses a compare-and-set on the group read just before (`media.group_id IS ?`), so a concurrent move or merge on another connection is never overwritten.
 - `rename_group` changes only `display_name`, never `normalized_name`.
 - Merge suggestions = pairs of groups with Levenshtein distance 1–2 on normalized names (`strsim`).
 - Upserts honour `user_pinned`: once a user moves/reclassifies a file, rescans keep its group/type/season/episode.

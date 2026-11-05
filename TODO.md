@@ -38,11 +38,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Renaming or moving a file (e.g. tidying `~/Downloads` into `~/Videos/Show/`) is seen as delete + new file. Progress, watched state, `user_pinned`, and group assignment are lost, and ffprobe/ffmpeg rerun.
   - **Solution:** During a scan, before hard-deleting a missing row, try to match a new file by `(size, mtime)` or `(dev, inode)`. Store these in new additive columns. If matched, `UPDATE media SET file_path = new` instead of delete + insert.
 
-- [ ] **ARCH-4 · Medium · Improvement** — Group identity has no alias concept, so merges and moves don't steer future scans.
-  - **Location:** `src-tauri/src/db.rs:127-148` (`find_or_create_group`), `:450-468` (`merge_groups`)
-  - **Problem:** Groups are keyed only by `normalized_name`. After a merge, the source name is gone, so the next file with that name creates a fresh group (see BUG-13). The same goes for any show whose release names vary in ways the parser doesn't normalize (a trailing year is stripped since BUG-17).
-  - **Solution:** Add an additive `show_group_aliases(normalized_name TEXT PRIMARY KEY, group_id INTEGER)` table. `find_or_create_group` checks aliases first. `merge_groups` inserts the source's normalized name as an alias of the target.
-
 - [ ] **ARCH-7 · Low · Confirmed** — Stringly-typed media types across the boundary.
   - **Location:** `src-tauri/src/db.rs:483-530` (`reclassify_media(target_type: &str)`), `models.rs:95-104` (`ContinueWatchingItem.mode`, `up_next_type`)
   - **Problem:** An unknown `target_type` is silently a no-op that returns `Ok(())`. Typos in JS can't be caught.
@@ -112,12 +107,6 @@ _Nothing picked yet. Move items here when you start them._
 
 
 
-
-- [ ] **BUG-13 · Medium · Confirmed (latent: merge UI is unreachable, see MAINT-1)** — Merged groups resurrect and split new episodes.
-  - **Location:** `src-tauri/src/db.rs:188` (`find_or_create_group` runs unconditionally before upsert), `:201-205`, `:450-468`
-  - **Problem:** After merging A into B, group A is deleted. The next scan recreates A for every A-named file (an empty group, re-suggested for merge). Any **newly downloaded** A episode gets `group_id = A`, splitting the show again.
-  - **Solution:** ARCH-4 (aliases). Also only call `find_or_create_group` when the row is new or `group_id IS NULL`.
-  - **Test:** `db::tests::merge_then_rescan_does_not_split` is `#[ignore]`d and fails today (verified 2026-11-01). Remove the `#[ignore]` as part of the fix.
 
 - [ ] **BUG-19 · Medium · Confirmed** — Thumbnails are never generated for clips shorter than 15 s, and never retried.
   - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:65-71` (probe closure, only for `is_new`), `:97-100` (commit + `on_file` call)
@@ -332,7 +321,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
+_Current state (2026-11-05): `cargo test` runs 88 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`), none ignored. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
 
 
 
@@ -349,7 +338,7 @@ _Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils
 - [ ] **MAINT-1 · Medium · Confirmed** — About 600 lines of dead UI, and AGENT.md describes features that aren't reachable.
   - **Location:** `src/components/library/{MergeSuggestionBanner,MergeGroupModal,RenameGroupModal,GroupTabs,GroupActionsMenu,ShowCard}.jsx`, `src/components/ui/Tab.jsx` (imported nowhere, or only by other dead files)
   - **Problem:** Merge, merge suggestions, and the group picker exist in the backend (`merge_groups_cmd`, `get_merge_suggestions_cmd`, `get_all_groups_cmd`) but have **no entry point** in the UI. AGENT.md §3 lists "merge suggestions" as part of `SeriesDetail.jsx`.
-  - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (after fixing BUG-13; BUG-32 is fixed), or delete the files and the unused commands. Update AGENT.md either way.
+  - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (BUG-13 and BUG-32 are fixed), or delete the files and the unused commands. Update AGENT.md either way.
 
 - [ ] **MAINT-2 · Low · Confirmed** — Small dead code paths.
   - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `commands/scanner.rs:199-202` (`get_scan_roots` unused, keep for FEAT-1)
@@ -417,6 +406,8 @@ _Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **ARCH-4**: additive `show_group_aliases` table. `find_group` checks aliases before `normalized_name`; `merge_groups` (now one transaction, errors on unknown ids) aliases the source name to the target and re-points the source's aliases. Merges made before this change left no alias.
+- [x] 2026-11-05 **BUG-13**: merged-away names resolve through their alias, and the upsert only resolves a group for new or NULL-group rows (compare-and-set on the group it read), so a merge is no longer undone by the next scan. `merge_then_rescan_does_not_split` is un-ignored and passes.
 - [x] 2026-11-05 **PERF-10**: ffprobe (30 s) and ffmpeg thumbnails (60 s) run through a std-only `run_with_timeout`; a hung child is killed and reaped in the background, and the file is treated as a per-file failure (duration 0 / no thumbnail). Thumbnails are written to `.part` and renamed on success, so a truncated file or dead mount can no longer stall the scan and hold the scan guard.
 - [x] 2026-11-05 **BUG-14** (backend): each scan upsert runs in a savepoint inside the batch, so a failing file is rolled back alone, logged, and skipped while the scan continues and reconciles; 20 consecutive failures (a read-only or broken DB) still fail the scan. A skipped file still counts as seen, so its existing row keeps its progress and visibility. Batch-level failures still abort. Showing a failed scan in the UI stays with FEAT-3.
 - [x] 2026-11-05 **BUG-42**: The SeriesDetail `keydown` listener is bound once and calls the current handler through a ref (`pageKeyDownRef`), so W/U (and Enter, arrows) never run a closure from an older render. `npm run lint` now reports 0 problems.
