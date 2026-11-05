@@ -431,6 +431,8 @@ export default function SeriesDetail() {
         activeTag === "textarea"
       )
         return;
+      // Leave keys to an open dialog, so Enter activates its focused button
+      if (deleteConfirmOpen || e.target?.closest?.("[role=dialog]")) return;
 
       if ((e.ctrlKey || e.metaKey) && key === "a") {
         e.preventDefault();
@@ -492,6 +494,7 @@ export default function SeriesDetail() {
     focusedEpisodeId,
     selectedEpisodes,
     viewMode,
+    deleteConfirmOpen,
   ]);
 
   if (!selectedGroupData) return null;
@@ -756,10 +759,16 @@ export default function SeriesDetail() {
         isOpen={deleteConfirmOpen}
         onClose={() => setDeleteConfirmOpen(false)}
         className="max-w-md"
+        labelledBy="delete-episodes-title"
       >
         <div className="flex items-center gap-3 text-red-400 mb-4 select-none">
           <AlertCircle className="w-6 h-6 stroke-[2]" />
-          <h3 className="text-lg font-bold text-white">Delete Episodes</h3>
+          <h3
+            id="delete-episodes-title"
+            className="text-lg font-bold text-white"
+          >
+            Delete Episodes
+          </h3>
         </div>
         <p className="text-zinc-400 text-sm mb-6 leading-relaxed select-none">
           Are you sure you want to delete{" "}
@@ -780,6 +789,7 @@ export default function SeriesDetail() {
           <Button
             onClick={() => setDeleteConfirmOpen(false)}
             variant="secondary"
+            data-autofocus
           >
             Cancel
           </Button>

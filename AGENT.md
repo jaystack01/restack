@@ -303,6 +303,7 @@ Episode/movie/other cards set `dataTransfer` `text/plain` to `JSON.stringify({ m
 - **Styling**: Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.js`). Use the tokens in `index.css` `@theme` (`bg-bg`, `bg-surface`, `bg-surface-card`, `text-text-secondary`, `text-accent`, `border-border`, `bg-progress`, `font-display`, …) over raw colors. Compose classes with `cn()`.
 - **Motion**: `framer-motion` (`motion`, `AnimatePresence`). **Icons**: `lucide-react`.
 - Dark-only UI, rounded cards, `select-none` app shell.
+- `components/ui/Modal` is an accessible dialog: `role=dialog`, focus trap, Escape closes it, and focus returns to the previous element on close. Mark the child that should get initial focus with `data-autofocus` (prefer Cancel for destructive confirms). Page-level `window` key handlers must ignore events while a dialog is open or whose target is inside `[role=dialog]`.
 - Thumbnails: always `convertFileSrc(thumbnailPath)`, and `draggable="false"` on `<img>`.
 
 ---

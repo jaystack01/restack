@@ -142,11 +142,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** A user folder called `dist` or `target` (e.g. `~/Videos/target/`) is silently skipped.
   - **Solution:** Match `target`/`dist`/`node_modules` only when the parent contains `Cargo.toml`/`package.json`, or make the exclusion list user-configurable (FEAT-1).
 
-- [ ] **BUG-22 · Low · Confirmed** — Global keyboard handler hijacks Enter/Escape while the delete modal is open.
-  - **Location:** `src/pages/SeriesDetail.jsx:411-457`, `src/components/ui/Modal.jsx` (no key handling)
-  - **Problem:** With the confirm modal open, focus stays on the trash button behind it. Enter then **plays the focused episode** (and `preventDefault` blocks the button). Escape clears the selection but leaves the modal open.
-  - **Solution:** Give Modal its own Escape handler, initial focus, and focus trap. Skip the page shortcuts while `deleteConfirmOpen` is true (or when `e.target` is inside `[role=dialog]`).
-
 - [ ] **BUG-23 · Low · Confirmed** — A second delete within 10 s makes the Undo banner disappear early.
   - **Location:** `src/pages/SeriesDetail.jsx:372-373`
   - **Problem:** The previous `timeoutId` is overwritten without `clearTimeout`, so the first timer clears the second banner. Undo also covers only the last batch, and the timer isn't cleared on unmount.
@@ -223,6 +218,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src/pages/SeriesDetail.jsx` (the `keydown` `useEffect` that handles `w`/`u`), reported by `react-hooks/exhaustive-deps`
   - **Problem:** The effect's dependency array omits `markSelectedWatched` and `markSelectedUnwatched`. They are recreated every render, so W/U can run a closure from an older render if anything they read changes without a listed dependency changing too.
   - **Solution:** Wrap both in `useCallback` with their real deps and list them, or read them through a ref. Do it with BUG-22 or CHORE-4, which touch the same handler. Then the lint warning goes away.
+
+- [ ] **BUG-43 · Low · Confirmed** — Enter on a focused page button plays the focused episode instead of pressing the button.
+  - **Location:** `src/pages/SeriesDetail.jsx` (`onPageKeyDown`, the `enter` branch)
+  - **Problem:** The page's Enter shortcut calls `preventDefault` whenever an episode is focused, even when keyboard focus is on a button (e.g. the selection bar's Delete button, where focus returns after the delete dialog closes). Enter then plays the episode and the button never activates.
+  - **Solution:** Skip the Enter (and Space, if added) shortcut when `e.target` is a `button`, `a`, or other interactive element.
 
 ## 🔐 Security and Data Integrity
 
@@ -381,7 +381,7 @@ _Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils
   - **Solution:** Keep AGENT.md §7 to *invariants and sharp edges an agent must know* and link here for the backlog. Update it when MAINT-1 lands (SEC-1, SEC-3, BUG-2, and PERF-6 already updated AGENT.md).
 
 - [ ] **CHORE-4 · Low · Improvement** — Split `pages/SeriesDetail.jsx` (724 lines).
-  - **Solution:** Extract `useEpisodeSelection` (selection, range, keyboard), `useUndoDelete`, `SeasonSection`, and `SeriesHeader` (inline rename). Do this after BUG-8 and BUG-22 so the fixes stay small.
+  - **Solution:** Extract `useEpisodeSelection` (selection, range, keyboard), `useUndoDelete`, `SeasonSection`, and `SeriesHeader` (inline rename). BUG-8 and BUG-22 are done, so the move is now a pure refactor.
 
 - [ ] **CHORE-5 · Low · Confirmed** — Raw colors instead of `@theme` tokens.
   - **Location:** 142 raw `zinc-*`/`red-*`/`amber-*`/hex usages across `src/`. Worst: `FirstScanOverlay.jsx`, `Sidebar.jsx`, `GroupTabs.jsx:58,71` (`#E0B0FF`), `index.css:56-62` (scrollbar)
@@ -432,6 +432,7 @@ _Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **BUG-22**: `ui/Modal` is now an accessible dialog (`role=dialog`, `aria-modal`, initial focus on the `data-autofocus` child, Tab trap, Escape closes, focus restored on close). The SeriesDetail shortcuts ignore keys while the delete dialog is open or inside any `[role=dialog]`, so Enter presses the focused dialog button (Cancel by default) and Escape keeps the selection. Follow-up: BUG-43.
 - [x] 2026-11-05 **ARCH-2**: `player.rs` is split into a pure `parse_ipc_line` → `IpcEvent`, a pure `ProgressTracker` (injected time; returns persist/exit decisions), the `drive_ipc` loop, and `track_progress` I/O glue. Behaviour is unchanged, except that property-changes for unobserved property names are now ignored (unreachable: mpv only reports observed properties). `play_next_episode` is still emitted after the loop, from `TrackerExit::play_next`.
 - [x] 2026-11-05 **TEST-3**: 20 tests feed recorded mpv IPC lines (and read errors) through the real `drive_ipc` with a fake clock: 5 s throttle, wall-clock reset on pause, watched latch, eof → position 0 + play next only at exit, quit/error/stop flush, read-error stop.
 - [x] 2026-11-05 **ARCH-5**: `src/api.js` wraps every Tauri command (JSDoc'd, returns the `invoke` promise untouched) plus `refreshLibrary()`; every `invoke()` in `src/` now goes through it. Error handling and await order are unchanged, including the silent catches (FEAT-3). `scanAndSync`, `getScanRoots`, and `getMergeSuggestions` have no callers yet (FEAT-1, MAINT-1).
