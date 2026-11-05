@@ -34,7 +34,7 @@ cd src-tauri && cargo clippy --all-targets -- -D warnings   # lint backend (kept
 ```
 
 - **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
-- **No frontend tests and no CI yet.** Verify changes with `npm run build`, `npm run lint`, `npm run format:check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
+- **No frontend tests yet.** CI (`.github/workflows/ci.yml`) runs lint, format check, build, clippy, and tests on every push to `develop`/`main` and on PRs. Verify locally before committing with `npm run build`, `npm run lint`, `npm run format:check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 - **Formatting**: Prettier with default options for `src/` and the root JS/JSON/HTML/CSS (`.prettierignore` skips `src-tauri`, `dist`, and Markdown), and default `cargo fmt` for Rust. Run `npm run format` before committing; don't hand-format against it.
 
 ### Git workflow

@@ -21,7 +21,7 @@ _Nothing picked yet. Move items here when you start them._
 1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
 3. ~~**Make it responsive**: PERF-1, PERF-6, PERF-7, PERF-8~~ (done 2026-11-04).
-4. **Safety net before refactors**: ~~CHORE-1~~ (done 2026-11-04), ~~TEST-1, TEST-2~~ (done 2026-11-01), ~~CHORE-2~~ (done 2026-11-05), CHORE-3.
+4. **Safety net before refactors**: ~~CHORE-1~~ (done 2026-11-04), ~~TEST-1, TEST-2~~ (done 2026-11-01), ~~CHORE-2, CHORE-3~~ (done 2026-11-05).
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
 
 ---
@@ -358,7 +358,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean apart from one `exhaustive-deps` warning (BUG-42)._
+_Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean apart from one `exhaustive-deps` warning (BUG-42)._
 
 
 
@@ -368,14 +368,11 @@ _Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils
 
 - [ ] **TEST-4 · Medium · Improvement** — Frontend unit tests (Vitest).
   - **Location:** `src/store/libraryStore.js`, selection logic in `src/pages/SeriesDetail.jsx`
-  - **Solution:** Mock `@tauri-apps/api/core`. Test `updateEpisodeProgress` immutability, that selection resets on group change (BUG-8 regression), and that delete only sends visible-group paths.
+  - **Solution:** Mock `@tauri-apps/api/core`. Test `updateEpisodeProgress` immutability, that selection resets on group change (BUG-8 regression), and that delete only sends visible-group paths. Add a `vitest run` step to `.github/workflows/ci.yml`.
 
 - [ ] **TEST-5 · Low · Improvement** — Manual QA checklist in AGENT.md for flows that can't be unit-tested.
   - **Problem:** Covers delete/undo on home and on an external drive, auto-play next, drag-reclassify, and first run with an empty DB.
   - **Solution:** Write the checklist using a throwaway `$HOME` (e.g. `HOME=/tmp/restack-qa npm run tauri dev`) so the real library is never touched (CLAUDE.md rule 7).
-
-- [ ] **CHORE-3 · Medium · Improvement** — Simple CI.
-  - **Solution:** GitHub Actions running `npm ci && npm run build`, `cargo check`, `cargo clippy -- -D warnings`, `cargo test`. Add `vitest run` once TEST-4 exists. Linux runner only; it needs the `libwebkit2gtk-4.1-dev` system deps.
 
 ## 🧹 Maintainability and Technical Debt
 
@@ -450,6 +447,7 @@ _Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **CHORE-3**: GitHub Actions CI (`.github/workflows/ci.yml`, ubuntu-24.04, Node 24, stable Rust) runs `npm ci`, `npm run lint`, `npm run format:check`, `npm run build`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked` on pushes to `develop`/`main` and on PRs. Add `vitest run` when TEST-4 lands.
 - [x] 2026-11-05 **CHORE-2**: Added ESLint 9 (flat config `eslint.config.js`: recommended + `react`, `react-hooks`, `no-shadow`) and Prettier 3 (default options, `.prettierignore` skips `src-tauri`, `dist` and Markdown). New scripts are `npm run lint`, `npm run format`, and `npm run format:check` (Prettier + `cargo fmt --check`). Fixed the 3 clippy warnings and removed unused imports. The whole tree was then reformatted in a separate style-only commit.
 - [x] 2026-11-05 **BUG-32**: `MergeGroupModal` imports `AlertCircle`, which it renders, instead of the unused `AlertTriangle`. ESLint caught it (`react/jsx-no-undef`).
 - [x] 2026-11-04 **PERF-1**: every Tauri command is now `async` and runs its existing sync body on the blocking pool (`run_blocking` in lib.rs: `spawn_blocking`, JoinError mapped to `Failed to run background task: …`). Scans are serialized by an RAII `ScanGuard` over `AppState.scan_running`; a second scan gets `Err("A scan is already running")` (tested: exclusive, released on Err and on panic). `delete_episodes_cmd`/`restore_episodes_cmd` take the same guard (`exclusive_with_scan` in commands/library.rs), so a Trash batch and a scan never overlap and a scan can't revive a trashed row (tested). `play_episode` no longer holds the player mutex across kill/wait/spawn; if two plays race, the newest mpv is kept. JS contract unchanged. Follow-ups: PERF-15, PERF-16.
