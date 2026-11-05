@@ -48,12 +48,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Groups are keyed only by `normalized_name`. After a merge, the source name is gone, so the next file with that name creates a fresh group (see BUG-13). The same goes for any show whose release names vary in ways the parser doesn't normalize (a trailing year is stripped since BUG-17).
   - **Solution:** Add an additive `show_group_aliases(normalized_name TEXT PRIMARY KEY, group_id INTEGER)` table. `find_or_create_group` checks aliases first. `merge_groups` inserts the source's normalized name as an alias of the target.
 
-- [ ] **ARCH-5 · Medium · Improvement** — No frontend API layer: `invoke()` strings and arg shapes are scattered across about 10 files.
-  - **Location:** `src/App.jsx`, `src/layouts/Sidebar.jsx`, `src/pages/*.jsx`, `src/components/library/{MergeGroupModal,RenameGroupModal,ShowCard}.jsx`
-  - **Problem:** Command names and camelCase arg shapes are repeated (e.g. `play_episode` with `startSeconds: null` appears in six places). A rename or signature change is a grep hunt, and the "mutate, then `get_library_grouped`, then `setLibrary`" refresh pattern is copy-pasted and sometimes done wrong (BUG-8).
-  - **Solution:** Add `src/api.js` exporting typed-by-JSDoc wrappers (`playMedia(path)`, `reclassify(ids, type, groupId)`, `refreshLibrary()` which also calls `setLibrary`). Route all calls through it.
-
-
 - [ ] **ARCH-7 · Low · Confirmed** — Stringly-typed media types across the boundary.
   - **Location:** `src-tauri/src/db.rs:483-530` (`reclassify_media(target_type: &str)`), `models.rs:95-104` (`ContinueWatchingItem.mode`, `up_next_type`)
   - **Problem:** An unknown `target_type` is silently a no-op that returns `Ok(())`. Typos in JS can't be caught.
@@ -447,6 +441,7 @@ _Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **ARCH-5**: `src/api.js` wraps every Tauri command (JSDoc'd, returns the `invoke` promise untouched) plus `refreshLibrary()`; every `invoke()` in `src/` now goes through it. Error handling and await order are unchanged, including the silent catches (FEAT-3). `scanAndSync`, `getScanRoots`, and `getMergeSuggestions` have no callers yet (FEAT-1, MAINT-1).
 - [x] 2026-11-05 **CHORE-3**: GitHub Actions CI (`.github/workflows/ci.yml`, ubuntu-24.04, Node 24, stable Rust) runs `npm ci`, `npm run lint`, `npm run format:check`, `npm run build`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked` on pushes to `develop`/`main` and on PRs. Add `vitest run` when TEST-4 lands.
 - [x] 2026-11-05 **CHORE-2**: Added ESLint 9 (flat config `eslint.config.js`: recommended + `react`, `react-hooks`, `no-shadow`) and Prettier 3 (default options, `.prettierignore` skips `src-tauri`, `dist` and Markdown). New scripts are `npm run lint`, `npm run format`, and `npm run format:check` (Prettier + `cargo fmt --check`). Fixed the 3 clippy warnings and removed unused imports. The whole tree was then reformatted in a separate style-only commit.
 - [x] 2026-11-05 **BUG-32**: `MergeGroupModal` imports `AlertCircle`, which it renders, instead of the unused `AlertTriangle`. ESLint caught it (`react/jsx-no-undef`).

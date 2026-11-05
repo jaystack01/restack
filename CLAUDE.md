@@ -16,9 +16,9 @@ Guidance for Claude Code in this repo. The full project context (architecture, s
 ## Working rules
 
 1. **Read before editing** `db.rs` upserts and `player.rs` tracking. Both encode subtle invariants: `user_pinned`, `COALESCE`/`CASE` on rescan, and emitting `play_next_episode` only after the IPC loop exits.
-2. **New Tauri command** means four edits: a `db.rs` fn, a `commands/*.rs` wrapper, `lib.rs` `generate_handler![]`, and a `models.rs` struct with `#[serde(rename_all = "camelCase")]`. JS calls it with camelCase args.
+2. **New Tauri command** means five edits: a `db.rs` fn, a `commands/*.rs` wrapper, `lib.rs` `generate_handler![]`, a `models.rs` struct with `#[serde(rename_all = "camelCase")]`, and a wrapper in `src/api.js` (camelCase args).
 3. **Schema change** means an additive `ALTER TABLE ... ADD COLUMN` guarded by the `PRAGMA table_info` check in `init_schema()`. Never drop or rename columns, because user DBs persist in `~/.local/share/com.jay.restack/`.
-4. **Frontend data flow**: mutate via `invoke`, then `setLibrary(await invoke("get_library_grouped"))`. Use `libraryStore.js`; don't add a state library.
+4. **Frontend data flow**: mutate via the `src/api.js` wrapper, then `await refreshLibrary()`. Never call `invoke()` outside `api.js`. Use `libraryStore.js`; don't add a state library.
 5. **Styling**: use the `@theme` tokens from `src/index.css` and `cn()`. No `tailwind.config.js`.
 6. **Match the surrounding style**: `Result<_, String>` with `format!("Failed to …: {e}")` in Rust, and function components + hooks in JSX. Keep comment density similar.
 7. **Don't touch the user's real library** while testing: `scan_user_storage` scans all of `$HOME`, and `delete_episodes_cmd` really moves files to Trash. Never run the app's delete flows against real files.

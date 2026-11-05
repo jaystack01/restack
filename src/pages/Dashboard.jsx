@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getContinueWatching, playMedia } from "../api";
 import { useNavigate } from "react-router-dom";
 import { Tv, Film, Folder } from "lucide-react";
 import { motion } from "framer-motion";
@@ -32,7 +32,7 @@ export default function Dashboard() {
   }, []);
 
   useEffect(() => {
-    invoke("get_continue_watching_single_cmd")
+    getContinueWatching()
       .then((item) => setContinueItem(item ?? null))
       .catch(() => setContinueItem(null));
   }, []);
@@ -78,12 +78,7 @@ export default function Dashboard() {
       <motion.div variants={itemVariants}>
         <ContinueWatchingRow
           item={continueItem}
-          onResume={(ep) =>
-            invoke("play_episode", {
-              filePath: ep.filePath,
-              startSeconds: null,
-            })
-          }
+          onResume={(ep) => playMedia(ep.filePath)}
         />
       </motion.div>
 

@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getAllGroups, mergeGroups } from "../../api";
 import { GitMerge, X, AlertCircle } from "lucide-react";
 import { motion } from "framer-motion";
 import Button from "../ui/Button";
@@ -17,7 +17,7 @@ export default function MergeGroupModal({
   const [error, setError] = useState("");
 
   useEffect(() => {
-    invoke("get_all_groups_cmd")
+    getAllGroups()
       .then((all) => setGroups(all.filter((g) => g.groupId !== sourceGroupId)))
       .catch(() => setError("Failed to load groups"))
       .finally(() => setFetching(false));
@@ -28,10 +28,7 @@ export default function MergeGroupModal({
     setLoading(true);
     setError("");
     try {
-      await invoke("merge_groups_cmd", {
-        sourceGroupId,
-        targetGroupId: selectedId,
-      });
+      await mergeGroups(sourceGroupId, selectedId);
       onSuccess();
     } catch (e) {
       setError(typeof e === "string" ? e : "Failed to merge groups");

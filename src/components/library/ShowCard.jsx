@@ -1,4 +1,5 @@
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { playMedia } from "../../api";
 import { useState, useEffect } from "react";
 import { Play, FileVideo } from "lucide-react";
 import { cn } from "../../utils/cn";
@@ -28,7 +29,7 @@ export default function ShowCard({
   function playEpisode() {
     if (isOpening) return;
     setIsOpening(true);
-    invoke("play_episode", { filePath, startSeconds: null })
+    playMedia(filePath)
       .catch((err) => console.error("Failed to play:", err))
       .finally(() => setIsOpening(false));
   }

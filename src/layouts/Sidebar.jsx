@@ -11,13 +11,12 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "../utils/cn";
-import { invoke } from "@tauri-apps/api/core";
+import { reclassify, refreshLibrary } from "../api";
 import {
   getSeries,
   getMovies,
   getOthers,
   subscribe,
-  setLibrary,
 } from "../store/libraryStore";
 
 function Sidebar({ onSync, isSyncing, scanState = {} }) {
@@ -54,15 +53,10 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
       const { mediaIds } = data;
       if (!mediaIds || !mediaIds.length) return;
 
-      await invoke("reclassify_media_cmd", {
-        mediaIds,
-        targetType,
-        targetGroupId,
-      });
+      await reclassify(mediaIds, targetType, targetGroupId);
 
       // Refresh frontend store instantly
-      const updated = await invoke("get_library_grouped");
-      setLibrary(updated);
+      await refreshLibrary();
     } catch (err) {
       console.error("Reclassification failed:", err);
     }

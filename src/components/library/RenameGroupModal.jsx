@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { renameGroup } from "../../api";
 
 /**
  * Modal for renaming a group. Pre-fills the current display name.
@@ -32,7 +32,7 @@ export default function RenameGroupModal({
     setLoading(true);
     setError("");
     try {
-      await invoke("rename_group_cmd", { groupId, newName: trimmed });
+      await renameGroup(groupId, trimmed);
       onSuccess();
     } catch (e) {
       setError(typeof e === "string" ? e : "Failed to rename group");

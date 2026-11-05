@@ -6,7 +6,7 @@ import SeriesDetail from "./pages/SeriesDetail";
 import MoviesPage from "./pages/MoviesPage";
 import OthersPage from "./pages/OthersPage";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { getLibraryGrouped, playMedia, scanUserStorage } from "./api";
 import { listen } from "@tauri-apps/api/event";
 import {
   setLibrary,
@@ -48,7 +48,7 @@ function App() {
 
     let libraryData = null;
     try {
-      libraryData = await invoke("scan_user_storage");
+      libraryData = await scanUserStorage();
     } catch {
       // silent
     }
@@ -120,7 +120,7 @@ function App() {
       // Show the library saved in the DB right away, so returning users don't
       // wait for the walk. An empty DB keeps the first-scan overlay up.
       try {
-        const cached = await invoke("get_library_grouped");
+        const cached = await getLibraryGrouped();
         if (cancelled) return;
         if (
           cached.series.length ||
@@ -157,10 +157,7 @@ function App() {
           const nextPath =
             typeof event.payload === "string" ? event.payload : null;
           if (!nextPath) return;
-          invoke("play_episode", {
-            filePath: nextPath,
-            startSeconds: null,
-          }).catch(() => {});
+          playMedia(nextPath).catch(() => {});
         }),
       ]).then(track);
     };

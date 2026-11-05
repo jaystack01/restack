@@ -1,6 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
-import { invoke } from "@tauri-apps/api/core";
+import {
+  deleteEpisodes,
+  getLibraryGrouped,
+  moveEpisodes,
+  playMedia,
+  renameGroup,
+  restoreEpisodes,
+  scanUserStorage,
+  setWatched,
+} from "../api";
 import {
   ArrowLeft,
   Edit2,
@@ -271,10 +280,7 @@ export default function SeriesDetail() {
     }
     event.preventDefault();
     try {
-      await invoke("play_episode", {
-        filePath: ep.filePath,
-        startSeconds: null,
-      });
+      await playMedia(ep.filePath);
     } catch {
       setError("Failed to start playback.");
     }
@@ -308,9 +314,7 @@ export default function SeriesDetail() {
 
   async function fetchLibrary(scan = false) {
     try {
-      const data = await invoke(
-        scan ? "scan_user_storage" : "get_library_grouped",
-      );
+      const data = await (scan ? scanUserStorage() : getLibraryGrouped());
       setLibrary(data);
     } catch (err) {
       setError(typeof err === "string" ? err : "Something went wrong");
@@ -320,10 +324,10 @@ export default function SeriesDetail() {
   async function updateEpisodesWatchState(episodes, watched) {
     if (!episodes.length) return;
     try {
-      await invoke("set_watched_cmd", {
-        mediaIds: episodes.map((ep) => ep.id),
+      await setWatched(
+        episodes.map((ep) => ep.id),
         watched,
-      });
+      );
       await fetchLibrary(false);
     } catch {
       setError("Failed to update watch state.");
@@ -356,7 +360,7 @@ export default function SeriesDetail() {
     const mediaIds = selected.map((ep) => ep.id).filter(Boolean);
     if (!mediaIds.length) return;
     try {
-      await invoke("move_episodes_cmd", { mediaIds, targetGroupId });
+      await moveEpisodes(mediaIds, targetGroupId);
       await fetchLibrary(false);
       setSelectedEpisodes(new Set());
     } catch {
@@ -380,7 +384,7 @@ export default function SeriesDetail() {
     const filePaths = pendingDeletePaths;
     setPendingDeletePaths([]);
     try {
-      await invoke("delete_episodes_cmd", { filePaths });
+      await deleteEpisodes(filePaths);
       await fetchLibrary(false);
       setSelectedEpisodes(new Set());
       const timeoutId = setTimeout(() => setRecentlyDeleted(null), 10000);
@@ -393,9 +397,7 @@ export default function SeriesDetail() {
   async function undoDelete() {
     if (!recentlyDeleted) return;
     try {
-      await invoke("restore_episodes_cmd", {
-        filePaths: recentlyDeleted.filePaths,
-      });
+      await restoreEpisodes(recentlyDeleted.filePaths);
       await fetchLibrary(false);
       clearTimeout(recentlyDeleted.timeoutId);
       setRecentlyDeleted(null);
@@ -410,10 +412,7 @@ export default function SeriesDetail() {
     if (!newName || newName === selectedGroupData.displayName)
       return setRenamingGroupId(null);
     try {
-      await invoke("rename_group_cmd", {
-        groupId: selectedGroupData.groupId,
-        newName,
-      });
+      await renameGroup(selectedGroupData.groupId, newName);
       setRenamingGroupId(null);
       await fetchLibrary(false);
     } catch {

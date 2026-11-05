@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { Search, Film, Play, Check } from "lucide-react";
 import { motion } from "framer-motion";
-import { invoke, convertFileSrc } from "@tauri-apps/api/core";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { playMedia } from "../api";
 import {
   getMovies,
   getPlayingFilePath,
@@ -36,10 +37,7 @@ export default function MoviesPage() {
 
   async function playMovie(movie) {
     try {
-      await invoke("play_episode", {
-        filePath: movie.filePath,
-        startSeconds: null,
-      });
+      await playMedia(movie.filePath);
     } catch {
       // silent
     }

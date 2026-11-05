@@ -122,6 +122,7 @@ src/
   App.jsx                    Routes, cached library on startup then background scan, all global
                              Tauri event listeners, Ctrl/Cmd+R = rescan
   index.css                  Tailwind v4 `@theme` design tokens (colors, fonts, shadows)
+  api.js                     One wrapper per Tauri command, plus refreshLibrary() (get_library_grouped → setLibrary)
   store/libraryStore.js      Hand-rolled pub/sub store (library + currently playing path)
   layouts/MainLayout.jsx     Shell: Sidebar + main + TopSyncBar + FirstScanOverlay
   layouts/Sidebar.jsx        Nav, series list, drag-and-drop reclassify targets
@@ -269,7 +270,9 @@ Tauri maps camelCase JS args to snake_case Rust params. Return structs use `#[se
 
 `LibraryResponse = { series: ShowGroup[], movies: MovieItem[], others: OtherItem[] }`, `ShowGroup = { groupId, displayName, seasons: [{ season, episodes: Episode[] }] }`.
 
-**Adding a command** takes four steps: write the fn in `db.rs`, add the `#[tauri::command]` wrapper in `commands/*.rs`, import it and add it to `generate_handler![]` in `lib.rs`, then add any new return type to `models.rs` with camelCase serde. The wrapper is an `async fn` that runs its body through `crate::run_blocking` (§7.1).
+The frontend calls commands only through `src/api.js` (one exported function per command, JSDoc'd args), never `invoke()` directly.
+
+**Adding a command** takes five steps: write the fn in `db.rs`, add the `#[tauri::command]` wrapper in `commands/*.rs`, import it and add it to `generate_handler![]` in `lib.rs`, add any new return type to `models.rs` with camelCase serde, then add its JS wrapper to `src/api.js`. The wrapper is an `async fn` that runs its body through `crate::run_blocking` (§7.1).
 
 ### Events (backend → frontend, all listened to in `App.jsx`)
 
@@ -294,7 +297,7 @@ Episode/movie/other cards set `dataTransfer` `text/plain` to `JSON.stringify({ m
 
 - **React 19, JSX (no TypeScript)**, function components + hooks, React Router v7 with **HashRouter** (`vite base: "./"`).
 - **State**: `libraryStore.js` only, with `getX()` / `setLibrary()` / `subscribe()` / `subscribePlaying()`. Components subscribe in `useEffect` and return the unsubscribe function. Don't add Redux/Zustand/Context for library data. `updateEpisodeProgress` copies only the path to the matching item and does not notify listeners when nothing changed.
-- After a mutating command, refresh with `invoke("get_library_grouped")` → `setLibrary(data)`. Don't rescan unless that's the intent.
+- Call the backend through `src/api.js`, never `invoke()` directly (`convertFileSrc` and `listen` are fine to import). After a mutating command, refresh with `await refreshLibrary()` (fetches `get_library_grouped` → `setLibrary`). Don't rescan unless that's the intent.
 - **Styling**: Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.js`). Use the tokens in `index.css` `@theme` (`bg-bg`, `bg-surface`, `bg-surface-card`, `text-text-secondary`, `text-accent`, `border-border`, `bg-progress`, `font-display`, …) over raw colors. Compose classes with `cn()`.
 - **Motion**: `framer-motion` (`motion`, `AnimatePresence`). **Icons**: `lucide-react`.
 - Dark-only UI, rounded cards, `select-none` app shell.

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Search, FileVideo, Check, FolderOpen } from "lucide-react";
 import { motion } from "framer-motion";
-import { invoke } from "@tauri-apps/api/core";
+import { playMedia } from "../api";
 import {
   getOthers,
   getPlayingFilePath,
@@ -44,10 +44,7 @@ export default function OthersPage() {
 
   async function playFile(item) {
     try {
-      await invoke("play_episode", {
-        filePath: item.filePath,
-        startSeconds: null,
-      });
+      await playMedia(item.filePath);
     } catch {
       // silent
     }
