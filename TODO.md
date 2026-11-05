@@ -121,7 +121,7 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **BUG-19 · Medium · Confirmed** — Thumbnails are never generated for clips shorter than 15 s, and never retried.
   - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:65-71` (probe closure, only for `is_new`), `:97-100` (commit + `on_file` call)
-  - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
+  - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed or timed-out ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
   - **Solution:** Seek to `min(15, duration * 0.1)` (duration is known first). Regenerate when `thumbnail_path IS NULL`, the file at `thumbnail_path` no longer exists, or `duration = 0`, not only for new files.
 
 - [ ] **BUG-20 · Medium · Confirmed** — The scanner walks hidden dirs and misses udisks2 mounts.
@@ -264,11 +264,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Fine for now; revisit with large libraries. Also, an absolute distance ≤ 2 on short names ("Dark" vs "Dare") gives false positives.
   - **Solution:** Use a relative threshold (`distance <= max(1, len/8)`) and skip groups with 0 live episodes.
 
-
-- [ ] **PERF-10 · Medium · Confirmed** — ffprobe/ffmpeg have no timeout.
-  - **Location:** `src-tauri/src/utils/scanner.rs:15-23`, `utils/thumbnail.rs:29-41`
-  - **Problem:** A truncated file or a hung network mount stalls the scan forever. Since PERF-1 the window stays responsive, but the scan never finishes and holds the scan guard, so every later scan and every delete/restore fails with "a scan is running" until restart.
-  - **Solution:** Spawn with `wait_timeout` (the `wait-timeout` crate), or pass ffmpeg `-rw_timeout` plus kill-after-N-seconds logic.
 
 - [ ] **PERF-11 · Low · Confirmed** — Episode grid/list work is quadratic and memo is defeated.
   - **Location:** `src/components/library/EpisodeGrid.jsx:27-29`, `EpisodeList.jsx:34-36` (per-card `episodes.filter(...)` every render), `src/pages/SeriesDetail.jsx:184-189,241,253` (new callbacks every render defeat `memo`)
@@ -422,6 +417,7 @@ _Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **PERF-10**: ffprobe (30 s) and ffmpeg thumbnails (60 s) run through a std-only `run_with_timeout`; a hung child is killed and reaped in the background, and the file is treated as a per-file failure (duration 0 / no thumbnail), so a truncated file or dead mount can no longer stall the scan and hold the scan guard.
 - [x] 2026-11-05 **BUG-14** (backend): each scan upsert runs in a savepoint inside the batch, so a failing file is rolled back alone, logged, and skipped while the scan continues and reconciles. A skipped file still counts as seen, so its existing row keeps its progress and visibility. Batch-level failures still abort. Showing a failed scan in the UI stays with FEAT-3.
 - [x] 2026-11-05 **BUG-42**: The SeriesDetail `keydown` listener is bound once and calls the current handler through a ref (`pageKeyDownRef`), so W/U (and Enter, arrows) never run a closure from an older render. `npm run lint` now reports 0 problems.
 - [x] 2026-11-05 **BUG-22**: `ui/Modal` is now an accessible dialog (`role=dialog`, `aria-modal`, initial focus on the `data-autofocus` child, Tab trap, Escape closes, focus restored on close). The SeriesDetail shortcuts ignore keys while the delete dialog is open or inside any `[role=dialog]`, so Enter presses the focused dialog button (Cancel by default) and Escape keeps the selection. Follow-up: BUG-43.

@@ -1,8 +1,11 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::env;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 use walkdir::WalkDir;
 
 pub fn is_supported_video(path: &Path) -> bool {
@@ -15,18 +18,78 @@ pub fn is_supported_video(path: &Path) -> bool {
     )
 }
 
+/// How long ffprobe may take on one file before the scan gives up on its duration.
+pub const FFPROBE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How often `run_with_timeout` checks whether the child has exited.
+const POLL_INTERVAL: Duration = Duration::from_millis(20);
+
+/// Run `cmd` to completion, killing it if it runs longer than `timeout`, so a
+/// truncated file or a hung mount can't stall the scan (and hold the scan guard).
+/// Stdin is closed and stdout is captured; stderr is left as the caller set it.
+pub fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<Output, String> {
+    let program = cmd.get_program().to_string_lossy().to_string();
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to run {program}: {e}"))?;
+
+    // Drain stdout on its own thread: a child blocked on a full pipe would never exit.
+    let mut stdout = child.stdout.take();
+    let reader = thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(out) = stdout.as_mut() {
+            let _ = out.read_to_end(&mut buf);
+        }
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let stdout = reader.join().unwrap_or_default();
+                return Ok(Output {
+                    status,
+                    stdout,
+                    stderr: Vec::new(),
+                });
+            }
+            Ok(None) if Instant::now() < deadline => thread::sleep(POLL_INTERVAL),
+            Ok(None) => {
+                let _ = child.kill();
+                // A process stuck in uninterruptible I/O (dead NFS) may not die right
+                // away: reap it in the background instead of blocking the scan on it.
+                // The reader thread ends once the pipe closes.
+                thread::spawn(move || child.wait());
+                return Err(format!(
+                    "Failed to run {program}: timed out after {timeout:?}"
+                ));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                thread::spawn(move || child.wait());
+                return Err(format!("Failed to wait for {program}: {e}"));
+            }
+        }
+    }
+}
+
 pub fn get_duration(file_path: &str) -> Result<i64, String> {
-    let output = Command::new("ffprobe")
-        .args([
-            "-v",
-            "quiet",
-            "-print_format",
-            "json",
-            "-show_format",
-            file_path,
-        ])
-        .output()
-        .map_err(|e| format!("Failed to run ffprobe: {}", e))?;
+    let output = run_with_timeout(
+        Command::new("ffprobe")
+            .args([
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_format",
+                file_path,
+            ])
+            .stderr(Stdio::null()),
+        FFPROBE_TIMEOUT,
+    )?;
 
     if !output.status.success() {
         return Err("ffprobe failed".to_string());
@@ -331,5 +394,50 @@ pub(crate) mod tests {
 
         assert!(walk.files.is_empty());
         assert_eq!(walk.incomplete_dirs, vec![locked]);
+    }
+
+    #[test]
+    fn run_with_timeout_returns_stdout_of_a_fast_command() {
+        let out = run_with_timeout(
+            Command::new("sh").args(["-c", "echo hello; exit 3"]),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(out.stdout, b"hello\n");
+        assert_eq!(out.status.code(), Some(3));
+    }
+
+    #[test]
+    fn run_with_timeout_reads_output_larger_than_the_pipe_buffer() {
+        // 1 MiB: far past the 64 KiB pipe buffer, so an unread pipe would deadlock
+        let out = run_with_timeout(
+            Command::new("head").args(["-c", "1048576", "/dev/zero"]),
+            Duration::from_secs(10),
+        )
+        .unwrap();
+        assert!(out.status.success());
+        assert_eq!(out.stdout.len(), 1 << 20);
+    }
+
+    #[test]
+    fn run_with_timeout_kills_a_hung_command() {
+        let started = Instant::now();
+        let err = run_with_timeout(Command::new("sleep").arg("5"), Duration::from_millis(200))
+            .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(started.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn run_with_timeout_reports_a_missing_program() {
+        let err = run_with_timeout(
+            &mut Command::new("restack-no-such-program"),
+            Duration::from_secs(1),
+        )
+        .unwrap_err();
+        assert!(
+            err.starts_with("Failed to run restack-no-such-program"),
+            "{err}"
+        );
     }
 }

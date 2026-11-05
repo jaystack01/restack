@@ -65,10 +65,15 @@ fn scan_roots_and_sync(app: &AppHandle, roots: &[String]) -> Result<LibraryRespo
             },
         );
 
-        // Only run ffmpeg / duration for new files (expensive)
+        // Only run ffmpeg / duration for new files (expensive). Both are time-limited;
+        // a failure or timeout just leaves duration 0 / no thumbnail for this file.
         if is_new {
+            let duration = get_duration(file_path).unwrap_or_else(|e| {
+                eprintln!("No duration for {file_path}: {e}");
+                0
+            });
             (
-                get_duration(file_path).unwrap_or(0),
+                duration,
                 crate::utils::thumbnail::generate_thumbnail(app, file_path),
             )
         } else {
