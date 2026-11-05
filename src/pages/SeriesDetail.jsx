@@ -420,82 +420,84 @@ export default function SeriesDetail() {
     }
   }
 
-  // Keyboard navigation
-  useEffect(() => {
-    function onKeyDown(e) {
-      const key = e.key.toLowerCase();
-      const activeTag = document.activeElement?.tagName?.toLowerCase();
-      if (
-        activeTag === "input" ||
-        activeTag === "select" ||
-        activeTag === "textarea"
-      )
-        return;
-      // Leave keys to an open dialog, so Enter activates its focused button
-      if (deleteConfirmOpen || e.target?.closest?.("[role=dialog]")) return;
+  // Keyboard navigation. The handler is rebuilt every render; the window
+  // listener is bound once and always calls the current one through a ref,
+  // so it never runs a stale closure.
+  function onPageKeyDown(e) {
+    const key = e.key.toLowerCase();
+    const activeTag = document.activeElement?.tagName?.toLowerCase();
+    if (
+      activeTag === "input" ||
+      activeTag === "select" ||
+      activeTag === "textarea"
+    )
+      return;
+    // Leave keys to an open dialog, so Enter activates its focused button
+    if (deleteConfirmOpen || e.target?.closest?.("[role=dialog]")) return;
 
-      if ((e.ctrlKey || e.metaKey) && key === "a") {
-        e.preventDefault();
-        setSelectedEpisodes(new Set(visibleEpisodePaths));
-        return;
-      }
-      if (key === "escape") {
-        e.preventDefault();
-        setSelectedEpisodes(new Set());
-        return;
-      }
-      if (!visibleEpisodesOrdered.length) return;
-      if (["arrowleft", "arrowright", "arrowup", "arrowdown"].includes(key)) {
-        e.preventDefault();
-        const cols = viewMode === "grid" ? getGridColumns() : 1;
-        const currentIndex = Math.max(
-          0,
-          visibleEpisodesOrdered.findIndex((ep) => ep.id === focusedEpisodeId),
-        );
-        let nextIndex = currentIndex;
-        if (key === "arrowleft") nextIndex = Math.max(0, currentIndex - 1);
-        if (key === "arrowright")
-          nextIndex = Math.min(
-            visibleEpisodesOrdered.length - 1,
-            currentIndex + 1,
-          );
-        if (key === "arrowup") nextIndex = Math.max(0, currentIndex - cols);
-        if (key === "arrowdown")
-          nextIndex = Math.min(
-            visibleEpisodesOrdered.length - 1,
-            currentIndex + cols,
-          );
-        const target = visibleEpisodesOrdered[nextIndex];
-        if (target) setFocusedEpisodeId(target.id);
-        return;
-      }
-      if (key === "enter" && focusedEpisodeId) {
-        e.preventDefault();
-        const target = visibleEpisodesOrdered.find(
-          (ep) => ep.id === focusedEpisodeId,
-        );
-        if (target) onEpisodeDoubleClick(e, target);
-        return;
-      }
-      if (key === "w" && selectedEpisodes.size > 0) {
-        e.preventDefault();
-        markSelectedWatched();
-      }
-      if (key === "u" && selectedEpisodes.size > 0) {
-        e.preventDefault();
-        markSelectedUnwatched();
-      }
+    if ((e.ctrlKey || e.metaKey) && key === "a") {
+      e.preventDefault();
+      setSelectedEpisodes(new Set(visibleEpisodePaths));
+      return;
     }
-    window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
-  }, [
-    visibleEpisodePaths,
-    visibleEpisodesOrdered,
-    focusedEpisodeId,
-    selectedEpisodes,
-    viewMode,
-    deleteConfirmOpen,
-  ]);
+    if (key === "escape") {
+      e.preventDefault();
+      setSelectedEpisodes(new Set());
+      return;
+    }
+    if (!visibleEpisodesOrdered.length) return;
+    if (["arrowleft", "arrowright", "arrowup", "arrowdown"].includes(key)) {
+      e.preventDefault();
+      const cols = viewMode === "grid" ? getGridColumns() : 1;
+      const currentIndex = Math.max(
+        0,
+        visibleEpisodesOrdered.findIndex((ep) => ep.id === focusedEpisodeId),
+      );
+      let nextIndex = currentIndex;
+      if (key === "arrowleft") nextIndex = Math.max(0, currentIndex - 1);
+      if (key === "arrowright")
+        nextIndex = Math.min(
+          visibleEpisodesOrdered.length - 1,
+          currentIndex + 1,
+        );
+      if (key === "arrowup") nextIndex = Math.max(0, currentIndex - cols);
+      if (key === "arrowdown")
+        nextIndex = Math.min(
+          visibleEpisodesOrdered.length - 1,
+          currentIndex + cols,
+        );
+      const target = visibleEpisodesOrdered[nextIndex];
+      if (target) setFocusedEpisodeId(target.id);
+      return;
+    }
+    if (key === "enter" && focusedEpisodeId) {
+      e.preventDefault();
+      const target = visibleEpisodesOrdered.find(
+        (ep) => ep.id === focusedEpisodeId,
+      );
+      if (target) onEpisodeDoubleClick(e, target);
+      return;
+    }
+    if (key === "w" && selectedEpisodes.size > 0) {
+      e.preventDefault();
+      markSelectedWatched();
+    }
+    if (key === "u" && selectedEpisodes.size > 0) {
+      e.preventDefault();
+      markSelectedUnwatched();
+    }
+  }
+
+  const pageKeyDownRef = useRef(onPageKeyDown);
+  useEffect(() => {
+    pageKeyDownRef.current = onPageKeyDown;
+  });
+
+  useEffect(() => {
+    const listener = (e) => pageKeyDownRef.current(e);
+    window.addEventListener("keydown", listener);
+    return () => window.removeEventListener("keydown", listener);
+  }, []);
 
   if (!selectedGroupData) return null;
 

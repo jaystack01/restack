@@ -214,11 +214,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** An existing unpinned series row keeps its `group_id` on rescan; only `show_name` is updated. After BUG-17 strips trailing years and fixes `S01.E02`, old `Doctor.Who.2005.S01E01` rows stay in group "Doctor Who 2005", while a newly added `Doctor.Who.2005.S01E09` parses as "Doctor Who" and lands in a different (new or existing) group, splitting the show. Same for `show s01`-style groups. Rows that change *type* (series → movie/other) are unaffected, because type changes clear `group_id`. Verified by reading the upsert; not reproduced against a real library.
   - **Solution:** Decide with ARCH-4/BUG-13 (aliases), since naively re-deriving `group_id` from `show_name` would undo merges and moves. A cheap interim option: when a rescan finds an unpinned row whose group's `normalized_name` differs from `normalize_name(show_name)` *and* that group has no pinned rows, move it to the parsed group and garbage-collect the emptied group (BUG-5). Add a db test with a pre-BUG-17 group.
 
-- [ ] **BUG-42 · Low · Potential** — The SeriesDetail keyboard handler can call stale `markSelectedWatched`/`markSelectedUnwatched`.
-  - **Location:** `src/pages/SeriesDetail.jsx` (the `keydown` `useEffect` that handles `w`/`u`), reported by `react-hooks/exhaustive-deps`
-  - **Problem:** The effect's dependency array omits `markSelectedWatched` and `markSelectedUnwatched`. They are recreated every render, so W/U can run a closure from an older render if anything they read changes without a listed dependency changing too.
-  - **Solution:** Wrap both in `useCallback` with their real deps and list them, or read them through a ref. Do it with BUG-22 or CHORE-4, which touch the same handler. Then the lint warning goes away.
-
 - [ ] **BUG-43 · Low · Confirmed** — Enter on a focused page button plays the focused episode instead of pressing the button.
   - **Location:** `src/pages/SeriesDetail.jsx` (`onPageKeyDown`, the `enter` branch)
   - **Problem:** The page's Enter shortcut calls `preventDefault` whenever an episode is focused, even when keyboard focus is on a button (e.g. the selection bar's Delete button, where focus returns after the delete dialog closes). Enter then plays the episode and the button never activates.
@@ -347,7 +342,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean apart from one `exhaustive-deps` warning (BUG-42)._
+_Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
 
 
 
@@ -432,6 +427,7 @@ _Current state (2026-11-05): `cargo test` runs 74 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **BUG-42**: The SeriesDetail `keydown` listener is bound once and calls the current handler through a ref (`pageKeyDownRef`), so W/U (and Enter, arrows) never run a closure from an older render. `npm run lint` now reports 0 problems.
 - [x] 2026-11-05 **BUG-22**: `ui/Modal` is now an accessible dialog (`role=dialog`, `aria-modal`, initial focus on the `data-autofocus` child, Tab trap, Escape closes, focus restored on close). The SeriesDetail shortcuts ignore keys while the delete dialog is open or inside any `[role=dialog]`, so Enter presses the focused dialog button (Cancel by default) and Escape keeps the selection. Follow-up: BUG-43.
 - [x] 2026-11-05 **ARCH-2**: `player.rs` is split into a pure `parse_ipc_line` → `IpcEvent`, a pure `ProgressTracker` (injected time; returns persist/exit decisions), the `drive_ipc` loop, and `track_progress` I/O glue. Behaviour is unchanged, except that property-changes for unobserved property names are now ignored (unreachable: mpv only reports observed properties). `play_next_episode` is still emitted after the loop, from `TrackerExit::play_next`.
 - [x] 2026-11-05 **TEST-3**: 20 tests feed recorded mpv IPC lines (and read errors) through the real `drive_ipc` with a fake clock: 5 s throttle, wall-clock reset on pause, watched latch, eof → position 0 + play next only at exit, quit/error/stop flush, read-error stop.
