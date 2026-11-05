@@ -344,7 +344,7 @@ _Nothing picked yet. Move items here when you start them._
 - [ ] **DEP-7 · Low · Potential** — An SVG is listed in the bundle icon list.
   - **Location:** `src-tauri/tauri.conf.json:34`
   - **Problem:** Tauri's bundler expects PNG/ICNS/ICO. Unverified whether `tauri build` warns, ignores it, or fails.
-  - **Solution:** Run `npm run tauri build` once. Generate the icon set with `tauri icon public/restack-icon.svg` (current PNGs are the default Tauri logo, dated Jul 5).
+  - **Solution:** Run `npm run tauri build` once. The icon set was regenerated from the new logo on 2026-11-05 (`tauri icon` on a 1024px render of `src-tauri/icons/restack-icon.svg`), so dropping the SVG entry should only need that check.
 
 - [ ] **DEP-8 · Low · Improvement** — Runtime tools aren't validated.
   - **Location:** `utils/scanner.rs:15`, `utils/thumbnail.rs:29`, `commands/player.rs:52`
