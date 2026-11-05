@@ -10,7 +10,7 @@ Guidance for Claude Code in this repo. The full project context (architecture, s
 
 - **App**: Restack, a Linux-only Tauri 2 (Rust) + React 19 (JSX) + Tailwind v4 local media indexer. Playback goes to `mpv`; thumbnails/duration come from `ffmpeg`/`ffprobe`.
 - **Run**: `npm run tauri dev`
-- **Verify**: `npm run build` and `cd src-tauri && cargo check && cargo test` (backend tests only; no frontend tests yet)
+- **Verify**: `npm run build`, `npm run lint`, `npm run format:check`, and `cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test` (backend tests only; no frontend tests yet)
 - **Hot spots**: `src-tauri/src/db.rs` (all SQL), `src/pages/SeriesDetail.jsx` (largest UI), `src/App.jsx` (event listeners + startup scan), `src-tauri/src/commands/player.rs` (mpv IPC thread).
 
 ## Working rules

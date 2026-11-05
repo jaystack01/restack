@@ -24,14 +24,18 @@ npm run tauri dev        # full app (runs vite on :1420 + Rust). Script forces G
 npm run tauri build      # release bundle
 npm run dev              # frontend only (vite, port 1420, strictPort) — invoke() calls will fail outside Tauri
 npm run build            # frontend production build → dist/
+npm run lint             # ESLint (react, react-hooks, no-shadow)
+npm run format           # Prettier on the frontend + cargo fmt on the backend
+npm run format:check     # same, check only
 
 cd src-tauri && cargo check    # type-check backend
 cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dirs)
-cd src-tauri && cargo clippy   # lint backend
+cd src-tauri && cargo clippy --all-targets -- -D warnings   # lint backend (kept at 0 warnings)
 ```
 
 - **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations), `utils/scanner.rs` (walk + reconcile decisions), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
-- **No frontend tests, no ESLint/Prettier config, no CI.** Verify changes with `npm run build`, `cargo check`, and `cargo test`.
+- **No frontend tests and no CI yet.** Verify changes with `npm run build`, `npm run lint`, `npm run format:check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
+- **Formatting**: Prettier with default options for `src/` and the root JS/JSON/HTML/CSS (`.prettierignore` skips `src-tauri`, `dist`, and Markdown), and default `cargo fmt` for Rust. Run `npm run format` before committing; don't hand-format against it.
 
 ### Git workflow
 
@@ -332,7 +336,7 @@ Still backlog: subtitle management, optional TMDB metadata, multi-user profiles,
 - Schema changes must be additive and backward compatible via the `PRAGMA table_info` pattern.
 - Respect `user_pinned`, `deleted_at`, and `missing_since` in any new query or upsert.
 - Don't introduce new heavy dependencies, background daemons, servers, or network calls without a clear reason. The product is offline-first and minimal.
-- Verify with `npm run build` and `cd src-tauri && cargo check && cargo test` before calling work done. Add tests next to the code you change, and keep them off the real DB/`$HOME`/Trash.
+- Verify with `npm run build`, `npm run lint`, `npm run format:check`, and `cd src-tauri && cargo clippy --all-targets -- -D warnings && cargo test` before calling work done. Add tests next to the code you change, and keep them off the real DB/`$HOME`/Trash.
 - Update this file when you change architecture, commands, events, schema, or conventions.
 - Keep `TODO.md` in sync with every change, following §10.
 

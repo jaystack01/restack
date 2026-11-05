@@ -442,9 +442,7 @@ pub fn get_full_library(conn: &Connection) -> Result<LibraryResponse, String> {
 
         let collected: Vec<OtherItem> = stmt.query_map([], |row| {
             let file_path: String = row.get(1)?;
-            let file_name = file_path.split('/').last()
-                .or_else(|| file_path.split('\\').last())
-                .unwrap_or(&file_path).to_string();
+            let file_name = file_path.rsplit('/').next().unwrap_or(&file_path).to_string();
             Ok(OtherItem {
                 id: row.get(0)?,
                 file_path,

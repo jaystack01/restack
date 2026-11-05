@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { GitMerge, X, AlertTriangle } from "lucide-react";
-import { motion, AnimatePresence } from "framer-motion";
+import { GitMerge, X, AlertCircle } from "lucide-react";
+import { motion } from "framer-motion";
 import Button from "../ui/Button";
 
 export default function MergeGroupModal({ sourceGroupId, sourceDisplayName, onClose, onSuccess }) {

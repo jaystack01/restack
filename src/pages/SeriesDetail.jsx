@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { ArrowLeft, Edit2, Search, LayoutGrid, List, SlidersHorizontal, ChevronRight, Info, Undo2, AlertCircle } from "lucide-react";

@@ -1,6 +1,6 @@
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { useState, useEffect } from "react";
-import { Play, Check, Film, FileVideo } from "lucide-react";
+import { Play, FileVideo } from "lucide-react";
 import { cn } from "../../utils/cn";
 import { getPlayingFilePath, subscribePlaying } from "../../store/libraryStore";
 

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { AlertTriangle, GitMerge, X } from "lucide-react";
+import { AlertTriangle, GitMerge } from "lucide-react";
 import MergeGroupModal from "./MergeGroupModal";
 import Button from "../ui/Button";
 

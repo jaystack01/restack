@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Play, Check, FileVideo } from "lucide-react";
+import { Play, Check } from "lucide-react";
 import { cn } from "../../utils/cn";
 
 function formatTime(seconds) {

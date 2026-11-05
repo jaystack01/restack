@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { Check, EyeOff, Trash2, X, MoveHorizontal, FolderPlus } from "lucide-react";
+import { Check, EyeOff, Trash2, X } from "lucide-react";
 import Button from "../ui/Button";
 import Select from "../ui/Select";
 

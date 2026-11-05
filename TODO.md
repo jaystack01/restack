@@ -8,6 +8,7 @@ Project backlog and progress tracker (committed alongside the code). The mainten
 - Priority: **Critical** (data loss / unusable) · **High** (breaks data or UX badly) · **Medium** (should fix soon) · **Low** (nice to have). Legacy P1/P2/P3 were mapped to High/Medium/Low.
 - Type: **Confirmed** (verified by reading the code end to end, running it, or checking the local DB) · **Potential** (plausible, needs a repro) · **Improvement** (not a defect).
 - Add new items at the bottom of their section with the next free ID for that prefix.
+- Line numbers in **Location** fields written before 2026-11-05 predate the `cargo fmt`/Prettier reformat (CHORE-2) and may be off. Search by the named function or snippet, and correct the line when you touch an item.
 
 ---
 
@@ -20,7 +21,7 @@ _Nothing picked yet. Move items here when you start them._
 1. ~~**Stop data loss**: SEC-1, SEC-2, BUG-1, BUG-3, BUG-8~~ (done 2026-11-01; follow-up BUG-35).
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
 3. ~~**Make it responsive**: PERF-1, PERF-6, PERF-7, PERF-8~~ (done 2026-11-04).
-4. **Safety net before refactors**: ~~CHORE-1~~ (done 2026-11-04), ~~TEST-1, TEST-2~~ (done 2026-11-01), CHORE-2, CHORE-3.
+4. **Safety net before refactors**: ~~CHORE-1~~ (done 2026-11-04), ~~TEST-1, TEST-2~~ (done 2026-11-01), ~~CHORE-2~~ (done 2026-11-05), CHORE-3.
 5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
 
 ---
@@ -195,11 +196,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** It waits at most 3 s for the socket. On a cold network/USB mount mpv can take longer, so playback works but no progress is saved, with no signal to the user. A `expect()` on `try_clone` at `:191` can also panic the thread.
   - **Solution:** Retry `connect` until the child exits (check `try_wait`) rather than a fixed count. Replace `expect` with an early return and a log.
 
-- [ ] **BUG-32 · Low · Confirmed** — Latent runtime error in `MergeGroupModal`.
-  - **Location:** `src/components/library/MergeGroupModal.jsx:3,106`
-  - **Problem:** `AlertCircle` is used but `AlertTriangle` is imported, so a ReferenceError fires whenever the error state renders. The component is currently unreachable (MAINT-1).
-  - **Solution:** Fix the import when reviving the merge UI, or delete the file.
-
 - [ ] **BUG-33 · Low · Confirmed** — Undefined Tailwind classes silently do nothing.
   - **Location:** `animate-in`/`fade-in`/`slide-in-from-top-2` (`SeriesDetail.jsx:484`, `MultiSelectBar.jsx:29`, `GroupActionsMenu.jsx:41`, `RenameGroupModal.jsx:42`, `MergeSuggestionBanner.jsx:23`) need the `tailwindcss-animate` plugin, which isn't installed. `bg-surface-2` (`RenameGroupModal.jsx:62`) isn't a theme token.
   - **Solution:** Replace these with `framer-motion` (already used) or define the keyframes/tokens in `index.css`.
@@ -233,6 +229,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/db.rs` `upsert_episode` (`group_id = CASE … WHEN media.group_id IS NULL THEN excluded.group_id ELSE media.group_id END`), `find_or_create_group`; triggered by BUG-17 (2026-11-04)
   - **Problem:** An existing unpinned series row keeps its `group_id` on rescan; only `show_name` is updated. After BUG-17 strips trailing years and fixes `S01.E02`, old `Doctor.Who.2005.S01E01` rows stay in group "Doctor Who 2005", while a newly added `Doctor.Who.2005.S01E09` parses as "Doctor Who" and lands in a different (new or existing) group, splitting the show. Same for `show s01`-style groups. Rows that change *type* (series → movie/other) are unaffected, because type changes clear `group_id`. Verified by reading the upsert; not reproduced against a real library.
   - **Solution:** Decide with ARCH-4/BUG-13 (aliases), since naively re-deriving `group_id` from `show_name` would undo merges and moves. A cheap interim option: when a rescan finds an unpinned row whose group's `normalized_name` differs from `normalize_name(show_name)` *and* that group has no pinned rows, move it to the parsed group and garbage-collect the emptied group (BUG-5). Add a db test with a pre-BUG-17 group.
+
+- [ ] **BUG-42 · Low · Potential** — The SeriesDetail keyboard handler can call stale `markSelectedWatched`/`markSelectedUnwatched`.
+  - **Location:** `src/pages/SeriesDetail.jsx` (the `keydown` `useEffect` that handles `w`/`u`), reported by `react-hooks/exhaustive-deps`
+  - **Problem:** The effect's dependency array omits `markSelectedWatched` and `markSelectedUnwatched`. They are recreated every render, so W/U can run a closure from an older render if anything they read changes without a listed dependency changing too.
+  - **Solution:** Wrap both in `useCallback` with their real deps and list them, or read them through a ref. Do it with BUG-22 or CHORE-4, which touch the same handler. Then the lint warning goes away.
 
 ## 🔐 Security and Data Integrity
 
@@ -355,14 +356,9 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** `Cargo.toml` still has `description = "A Tauri App"`, `authors = ["you"]`. The default window of 800×600 is small.
   - **Solution:** Set a larger default plus `minWidth`/`minHeight`.
 
-- [ ] **CHORE-2 · Medium · Improvement** — No lint/format tooling.
-  - **Location:** repo root
-  - **Problem:** ESLint would have caught BUG-8 (`no-shadow`), BUG-32 (`no-undef`), and missing hook deps (`react-hooks/exhaustive-deps`, e.g. `SeriesDetail.jsx:457`). `cargo clippy` currently reports 3 warnings (`Iterator::last` on `DoubleEndedIterator` ×2 at `db.rs:445-446`, a needless borrow at `utils/scanner.rs:17`).
-  - **Solution:** Add ESLint (with `react-hooks`) and Prettier for the frontend, and run `cargo clippy` / `cargo fmt` for the backend.
-
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI._
+_Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`) plus 1 `#[ignore]`d test that reproduces open bug BUG-13. No frontend tests, no CI. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean apart from one `exhaustive-deps` warning (BUG-42)._
 
 
 
@@ -386,10 +382,10 @@ _Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils
 - [ ] **MAINT-1 · Medium · Confirmed** — About 600 lines of dead UI, and AGENT.md describes features that aren't reachable.
   - **Location:** `src/components/library/{MergeSuggestionBanner,MergeGroupModal,RenameGroupModal,GroupTabs,GroupActionsMenu,ShowCard}.jsx`, `src/components/ui/Tab.jsx` (imported nowhere, or only by other dead files)
   - **Problem:** Merge, merge suggestions, and the group picker exist in the backend (`merge_groups_cmd`, `get_merge_suggestions_cmd`, `get_all_groups_cmd`) but have **no entry point** in the UI. AGENT.md §3 lists "merge suggestions" as part of `SeriesDetail.jsx`.
-  - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (after fixing BUG-13 and BUG-32), or delete the files and the unused commands. Update AGENT.md either way.
+  - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (after fixing BUG-13; BUG-32 is fixed), or delete the files and the unused commands. Update AGENT.md either way.
 
 - [ ] **MAINT-2 · Low · Confirmed** — Small dead code paths.
-  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `:1` (`React` default import unused), `commands/scanner.rs:199-202` (`get_scan_roots` unused, keep for FEAT-1), `db.rs:409` (Windows `\\` fallback in a Linux-only app, and `.or_else` can never trigger)
+  - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `commands/scanner.rs:199-202` (`get_scan_roots` unused, keep for FEAT-1)
   - **Solution:** Remove these during the next touch of each file.
 
 - [ ] **MAINT-3 · Low · Confirmed** — SeriesDetail error banner is sticky and errors are generic.
@@ -454,6 +450,8 @@ _Current state (2026-11-04): `cargo test` runs 54 backend tests (`db.rs`, `utils
 
 ## ✅ Done
 
+- [x] 2026-11-05 **CHORE-2**: Added ESLint 9 (flat config `eslint.config.js`: recommended + `react`, `react-hooks`, `no-shadow`) and Prettier 3 (default options, `.prettierignore` skips `src-tauri`, `dist` and Markdown). New scripts are `npm run lint`, `npm run format`, and `npm run format:check` (Prettier + `cargo fmt --check`). Fixed the 3 clippy warnings and removed unused imports. The whole tree was then reformatted in a separate style-only commit.
+- [x] 2026-11-05 **BUG-32**: `MergeGroupModal` imports `AlertCircle`, which it renders, instead of the unused `AlertTriangle`. ESLint caught it (`react/jsx-no-undef`).
 - [x] 2026-11-04 **PERF-1**: every Tauri command is now `async` and runs its existing sync body on the blocking pool (`run_blocking` in lib.rs: `spawn_blocking`, JoinError mapped to `Failed to run background task: …`). Scans are serialized by an RAII `ScanGuard` over `AppState.scan_running`; a second scan gets `Err("A scan is already running")` (tested: exclusive, released on Err and on panic). `delete_episodes_cmd`/`restore_episodes_cmd` take the same guard (`exclusive_with_scan` in commands/library.rs), so a Trash batch and a scan never overlap and a scan can't revive a trashed row (tested). `play_episode` no longer holds the player mutex across kill/wait/spawn; if two plays race, the newest mpv is kept. JS contract unchanged. Follow-ups: PERF-15, PERF-16.
 - [x] 2026-11-04 **BUG-38**: Dash episodes can have 4 digits except 19xx/20xx. `One_Piece_-_1071` is S1E1071, and `Show - 2019` is still Movie "Show" (2019).
 - [x] 2026-11-04 **BUG-18**: A parenthesised release year from the raw name is used first. Otherwise the last year-like number wins. `Blade Runner 2049 (2017)` and `The.Dark.Knight.(2008)` parse correctly.

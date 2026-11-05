@@ -1,7 +1,6 @@
 import { memo } from "react";
 import { Play, FileVideo } from "lucide-react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { cn } from "../../utils/cn";
 
 function formatTime(seconds) {
   if (!seconds || seconds < 0) return "0:00";

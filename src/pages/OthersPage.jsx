@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Search, FileVideo, Play, Check, FolderOpen } from "lucide-react";
+import { Search, FileVideo, Check, FolderOpen } from "lucide-react";
 import { motion } from "framer-motion";
 import { invoke } from "@tauri-apps/api/core";
 import { getOthers, getPlayingFilePath, subscribe, subscribePlaying } from "../store/libraryStore";

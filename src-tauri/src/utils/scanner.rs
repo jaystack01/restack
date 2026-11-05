@@ -14,7 +14,7 @@ pub fn is_supported_video(path: &Path) -> bool {
 
 pub fn get_duration(file_path: &str) -> Result<i64, String> {
     let output = Command::new("ffprobe")
-        .args(&[
+        .args([
             "-v", "quiet",
             "-print_format", "json",
             "-show_format",
