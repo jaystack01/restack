@@ -55,11 +55,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Re-checked 2026-11-11: merge, move, reclassify, and set_watched already run as single transactions (scan upserts are batched since PERF-7), so a failure no longer leaves partial state. What remains is per-row `UPDATE` loops inside those transactions.
   - **Solution:** Use one `UPDATE … WHERE id IN (…)` per statement where the per-row logic allows it (`move_episodes`, `set_watched`). `reclassify_media` numbers episodes per row and may stay a loop.
 
-- [ ] **DES-2 · Low · Confirmed** — Errors are silently swallowed or dropped in the DB layer.
-  - **Location:** `src-tauri/src/db.rs:430,459` (`filter_map(|r| r.ok())` drops movie/other rows), `:540,548` (`unwrap_or((1,0))`, `unwrap_or(0)`), `get_episode_meta` / `get_next_episode` (`.ok()?` everywhere). (`get_last_position` was replaced by `get_playback_state`, which uses `.optional()`.)
-  - **Problem:** A bad row disappears from the library without a trace. A DB lock or error during reclassify silently numbers the episode as S01E01.
-  - **Solution:** Propagate errors with `?` and `format!("Failed to …: {e}")`. Use `.optional()` (rusqlite `OptionalExtension`) for "no row" instead of catch-all `Err(_)`.
-
 - [ ] **DES-3 · Low · Confirmed** — Error-message style is inconsistent with the project convention.
   - **Location:** `commands/player.rs:131`, `utils/scanner.rs:23,30`, `utils/thumbnail.rs:10,12` (`format!("…{}", e)`)
   - **Problem:** CLAUDE.md requires `format!("Failed to …: {e}")`. Bare `e.to_string()` gives the user/log no context.
@@ -88,6 +83,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src/pages/SeriesDetail.jsx` (`selectedEpisodes`, a Set of `filePath`), drag payloads use `id` (`EpisodeGrid.jsx`), move uses ids; delete/restore take ids since SEC-4 (2026-11-11) and are mapped from the path-keyed selection in `deleteSelectedEpisodes`
   - **Problem:** Two keys for the same entity make bugs like BUG-8 more likely.
   - **Solution:** Key selection by `id` throughout (the backend is now id-based for every mutation).
+
+- [ ] **DES-9 · Low · Improvement** — Player lookups and pointer clean-ups still hide DB errors.
+  - **Location:** `src-tauri/src/db.rs` `get_episode_meta`, `get_next_episode` (return `Option`, log errors), `get_continue_watching_single` (two `let _ = conn.execute(...)` pointer clean-ups); callers in `src-tauri/src/commands/player.rs`
+  - **Problem:** Since DES-2 these lookups log a DB error, but callers can't tell "no row" from "query failed", so a failed lookup looks like "no next episode". The two best-effort clean-ups of a stale Continue Watching pointer drop their errors entirely.
+  - **Solution:** Return `Result<Option<_>, String>` from `get_episode_meta`/`get_next_episode` and handle (log) the `Err` in `commands/player.rs`. Log the clean-up errors instead of `let _ =`.
 
 ## 🐛 Bugs and Logical Errors
 
@@ -360,6 +360,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **DES-2**: library/group/suggestion queries, reclassify and Continue Watching propagate errors (OptionalExtension for 'no row'); a read error no longer deletes the Continue Watching pointer; reclassify skips unknown ids. `get_episode_meta`/`get_next_episode` keep `Option` but log errors (follow-up DES-9).
 - [x] 2026-11-11 **BUG-19**: thumbnail seek = min(15 s, 10% of duration), 1 s if unknown (`thumbnail_seek`); scans retry known files: ffprobe when duration = 0, ffmpeg when `thumbnail_path` is NULL or its file is gone (`ProbeNeed`, `db::get_known_media`). Complete files are never re-probed; failed retries keep existing values (CASE/COALESCE).
 - [x] 2026-11-11 **BUG-47**: read-then-write transactions (scan `UpsertBatch`, migrate/merge/move/reclassify/set_watched/sync_missing_media) begin IMMEDIATE via `db::begin_write`, so under WAL they wait for the write lock instead of failing with SQLITE_BUSY(_SNAPSHOT). Tested with two connections on a temp WAL DB.
 - [x] 2026-11-11 **BUG-23**: Undo timer lives in a ref, cleared before each new batch, on Undo and on unmount. Note: Undo still covers only the last batch (by design for now).

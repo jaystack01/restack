@@ -114,8 +114,8 @@ pub fn init_schema(conn: &Connection) -> Result<(), String> {
         let cols: Vec<String> = stmt
             .query_map([], |row| row.get::<_, String>(1))
             .map_err(|e| format!("Failed to read table_info rows: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("Failed to read table_info rows: {e}"))?;
         cols
     };
 
@@ -555,8 +555,8 @@ pub fn get_full_library(conn: &Connection) -> Result<LibraryResponse, String> {
                 })
             })
             .map_err(|e| format!("Failed to read movie rows: {e}"))?
-            .filter_map(|r| r.ok())
-            .collect();
+            .collect::<Result<_, _>>()
+            .map_err(|e| format!("Failed to read movie rows: {e}"))?;
         collected
     };
 
@@ -588,8 +588,8 @@ pub fn get_full_library(conn: &Connection) -> Result<LibraryResponse, String> {
                     })
                 })
                 .map_err(|e| format!("Failed to read other rows: {e}"))?
-                .filter_map(|r| r.ok())
-                .collect();
+                .collect::<Result<_, _>>()
+                .map_err(|e| format!("Failed to read other rows: {e}"))?;
             collected
         };
 
@@ -719,21 +719,26 @@ pub fn reclassify_media(
             .map_err(|e| format!("Failed to reclassify to other: {e}"))?;
         } else if target_type == "series" {
             if let Some(group_id) = target_group_id {
-                let current: (i64, i64) = tx
+                let current: Option<(i64, i64)> = tx
                     .query_row(
                         "SELECT season, episode FROM media WHERE id = ?1",
                         params![media_id],
                         |row| Ok((row.get(0)?, row.get(1)?)),
                     )
-                    .unwrap_or((1, 0));
+                    .optional()
+                    .map_err(|e| format!("Failed to read media id {media_id}: {e}"))?;
+                // An unknown id has nothing to reclassify (the UPDATEs would match no row)
+                let Some((season, episode)) = current else {
+                    continue;
+                };
 
-                let (season, episode) = current;
                 if season == 0 || episode == 0 {
                     let max_ep: i64 = tx.query_row(
                         "SELECT COALESCE(MAX(episode), 0) FROM media WHERE group_id = ?1 AND season = 1 AND deleted_at IS NULL",
                         params![group_id],
                         |row| row.get(0)
-                    ).unwrap_or(0);
+                    )
+                    .map_err(|e| format!("Failed to number reclassified episode: {e}"))?;
                     tx.execute(
                         "UPDATE media SET media_type = 'series', group_id = ?1, season = 1, episode = ?2, user_pinned = 1 WHERE id = ?3",
                         params![group_id, max_ep + 1, media_id],
@@ -795,8 +800,8 @@ pub fn get_all_groups(conn: &Connection) -> Result<Vec<GroupInfo>, String> {
             })
         })
         .map_err(|e| format!("Failed to read group rows: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Failed to read group rows: {e}"))?;
 
     Ok(collected)
 }
@@ -826,8 +831,8 @@ pub fn get_merge_suggestions(conn: &Connection) -> Result<Vec<MergeSuggestion>, 
             ))
         })
         .map_err(|e| format!("Failed to read groups for suggestions: {e}"))?
-        .filter_map(|r| r.ok())
-        .collect();
+        .collect::<Result<_, _>>()
+        .map_err(|e| format!("Failed to read groups for suggestions: {e}"))?;
 
     let mut suggestions = Vec::new();
 
@@ -920,18 +925,29 @@ pub fn set_watched(conn: &Connection, media_ids: &[i64], watched: bool) -> Resul
         .map_err(|e| format!("Failed to commit watched update: {e}"))
 }
 
+/// `(group_id, season, episode)` of a series row, or `None` for an unknown file or a
+/// row without a group (movies, others). A DB error is logged and also gives `None`:
+/// callers only use this to find the next episode, which is best effort.
 pub fn get_episode_meta(conn: &Connection, file_path: &str) -> Option<(i64, u32, u32)> {
-    let mut stmt = conn
-        .prepare("SELECT group_id, season, episode FROM media WHERE file_path = ?1")
-        .ok()?;
-
-    stmt.query_row([file_path], |row| {
-        let group_id: i64 = row.get(0)?;
-        let season: i64 = row.get(1)?;
-        let episode: i64 = row.get(2)?;
-        Ok((group_id, season as u32, episode as u32))
-    })
-    .ok()
+    let meta = conn
+        .query_row(
+            "SELECT group_id, season, episode FROM media WHERE file_path = ?1",
+            [file_path],
+            |row| {
+                let group_id: Option<i64> = row.get(0)?;
+                let season: i64 = row.get(1)?;
+                let episode: i64 = row.get(2)?;
+                Ok(group_id.map(|g| (g, season as u32, episode as u32)))
+            },
+        )
+        .optional();
+    match meta {
+        Ok(found) => found.flatten(),
+        Err(e) => {
+            eprintln!("Failed to read episode info for {file_path}: {e}");
+            None
+        }
+    }
 }
 
 pub fn get_next_episode(
@@ -940,7 +956,7 @@ pub fn get_next_episode(
     season: u32,
     episode: u32,
 ) -> Option<String> {
-    let mut stmt = conn
+    let next = conn
         .prepare(
             "
             SELECT file_path FROM media
@@ -954,10 +970,15 @@ pub fn get_next_episode(
             LIMIT 1
             ",
         )
-        .ok()?;
-
-    stmt.query_row(params![group_id, season, episode], |row| row.get(0))
-        .ok()
+        .and_then(|mut stmt| {
+            stmt.query_row(params![group_id, season, episode], |row| row.get(0))
+                .optional()
+        });
+    // Best effort like `get_episode_meta`: an error means no auto-play, but is logged
+    next.unwrap_or_else(|e| {
+        eprintln!("Failed to find the next episode: {e}");
+        None
+    })
 }
 
 pub fn get_continue_watching_single(
@@ -967,9 +988,11 @@ pub fn get_continue_watching_single(
         .query_row(
             "SELECT value_text FROM app_state WHERE key = 'last_watched_episode_id'",
             [],
-            |row| row.get(0),
+            |row| row.get::<_, Option<String>>(0),
         )
-        .ok();
+        .optional()
+        .map(Option::flatten)
+        .map_err(|e| format!("Failed to read last watched episode: {e}"))?;
 
     let Some(last_id_text) = last_id_text else {
         return Ok(None);
@@ -1015,9 +1038,13 @@ pub fn get_continue_watching_single(
                 row.get::<_, i64>(9)?,
             ))
         },
-    );
+    )
+    .optional()
+    .map_err(|e| format!("Failed to read last watched episode: {e}"))?;
 
-    let Ok((
+    // No live series row (trashed, missing, reclassified or removed). A DB error above
+    // is returned instead, so a busy database never drops the pointer.
+    let Some((
         _,
         display_name,
         file_path,
@@ -1037,6 +1064,8 @@ pub fn get_continue_watching_single(
                 params![last_id],
                 |row| row.get::<_, bool>(0),
             )
+            .optional()
+            .map_err(|e| format!("Failed to read last watched episode: {e}"))?
             .unwrap_or(false);
         if !is_missing {
             let _ = conn.execute(
@@ -1099,9 +1128,11 @@ pub fn get_continue_watching_single(
                 row.get::<_, Option<String>>(7)?,
             ))
         },
-    );
+    )
+    .optional()
+    .map_err(|e| format!("Failed to read the next episode: {e}"))?;
 
-    let Ok((
+    let Some((
         next_display_name,
         next_file_path,
         next_season,
@@ -2645,6 +2676,83 @@ mod tests {
             (s.episode_count_b, s.episode_count_a)
         };
         assert_eq!(counts, (1, 1));
+    }
+
+    #[test]
+    fn unreadable_rows_fail_the_library_instead_of_vanishing() {
+        let conn = test_db();
+        upsert_movie(&conn, "/v/m (2001).mkv", "M", Some(2001), 100, None).unwrap();
+        upsert_other(&conn, "/v/clip.mkv", "clip", 10, None).unwrap();
+        assert_eq!(library_paths(&conn).len(), 2);
+
+        // A value that can't be read as an integer, like a corrupt row
+        conn.execute(
+            "UPDATE media SET last_position = 'bad' WHERE file_path = '/v/clip.mkv'",
+            [],
+        )
+        .unwrap();
+        let Err(err) = get_full_library(&conn) else {
+            panic!("library read should fail");
+        };
+        assert!(err.contains("Failed to read other rows"), "{err}");
+    }
+
+    #[test]
+    fn continue_watching_error_keeps_the_pointer() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 100, None).unwrap();
+        update_progress(&conn, "/v/a.s01e01.mkv", 30, false).unwrap();
+        conn.execute("UPDATE media SET last_position = 'bad'", [])
+            .unwrap();
+
+        assert!(get_continue_watching_single(&conn).is_err());
+        let pointer: bool = conn
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM app_state WHERE key = 'last_watched_episode_id')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(pointer, "a read error must not clear Continue Watching");
+    }
+
+    #[test]
+    fn reclassify_skips_unknown_ids() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/a.s01e03.mkv", &ep("A", 1, 3), 100, None).unwrap();
+        upsert_other(&conn, "/v/clip.mkv", "clip", 10, None).unwrap();
+        let group = row::<i64>(&conn, "/v/a.s01e03.mkv", "group_id");
+        let clip = id_of(&conn, "/v/clip.mkv");
+
+        reclassify_media(&conn, &[9999, clip], "series", Some(group)).unwrap();
+
+        assert_eq!(row::<i64>(&conn, "/v/clip.mkv", "group_id"), group);
+        assert_eq!(row::<i64>(&conn, "/v/clip.mkv", "season"), 1);
+        assert_eq!(row::<i64>(&conn, "/v/clip.mkv", "episode"), 4);
+    }
+
+    #[test]
+    fn episode_meta_and_next_episode_are_best_effort() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 100, None).unwrap();
+        upsert_episode(&conn, "/v/a.s01e02.mkv", &ep("A", 1, 2), 100, None).unwrap();
+        upsert_movie(&conn, "/v/m (2001).mkv", "M", Some(2001), 100, None).unwrap();
+
+        let (group, season, episode) = get_episode_meta(&conn, "/v/a.s01e01.mkv").unwrap();
+        assert_eq!((season, episode), (1, 1));
+        assert_eq!(
+            get_next_episode(&conn, group, season, episode).as_deref(),
+            Some("/v/a.s01e02.mkv")
+        );
+        assert_eq!(get_next_episode(&conn, group, 1, 2), None);
+        // Movies have no group, unknown files no row: no next episode, no error
+        assert_eq!(get_episode_meta(&conn, "/v/m (2001).mkv"), None);
+        assert_eq!(get_episode_meta(&conn, "/v/unknown.mkv"), None);
+
+        // A DB error is logged and reads as "none"
+        conn.execute_batch("DROP TABLE media").unwrap();
+        assert_eq!(get_episode_meta(&conn, "/v/a.s01e01.mkv"), None);
+        assert_eq!(get_next_episode(&conn, group, 1, 1), None);
     }
 
     /// A database file in a fresh temp dir (WAL needs a real file), removed on drop.

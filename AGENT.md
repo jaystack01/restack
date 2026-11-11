@@ -331,7 +331,8 @@ Check these before you assume a behaviour is intended. This list only covers sha
 5. Unchanged files that aren't re-probed (and failed retries) get `duration = 0` / `thumb = None` on rescan. The upserts handle this via `CASE`/`COALESCE`, so preserve that logic if you edit upserts.
 6. Many `invoke` calls swallow errors (`catch {}`). The App-level scan is intentionally silent.
 7. `index.css` imports Google Fonts. That conflicts with offline-first, and the CSP (`default-src 'self'`) likely blocks it in the webview, so the system font fallback is what renders.
-8. mpv sockets live in `$XDG_RUNTIME_DIR/mpv-<uuid>.sock` (fallback `/tmp/mpv-<uuid>.sock`, see `mpv_socket_dir`) and are cleaned up when the tracker ends.
+8. A DB read error in the library or Continue Watching queries now returns `Err` (shown to the user, see DES-2) instead of silently hiding rows, so one corrupt row fails the whole library load. `get_episode_meta`/`get_next_episode` still return `Option` and only log errors (DES-9).
+9. mpv sockets live in `$XDG_RUNTIME_DIR/mpv-<uuid>.sock` (fallback `/tmp/mpv-<uuid>.sock`, see `mpv_socket_dir`) and are cleaned up when the tracker ends.
 
 ---
 
