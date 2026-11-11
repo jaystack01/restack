@@ -70,8 +70,8 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Move them to `src/utils/format.js`.
 
 - [ ] **DES-7 · Low · Confirmed** — Magic numbers are spread across layers.
-  - **Location:** thumbnail seek cap 15 s / 10% (`thumbnail_seek` in `thumbnail.rs`), socket wait `15×200ms` (`player.rs:105-110`), `EPISODE_CLICK_DELAY_MS` (`SeriesDetail.jsx:22`), undo window `10000` (`SeriesDetail.jsx` `confirmDelete`), `MIN_SCAN_DISPLAY_MS` (`App.jsx:20`)
-  - **Problem:** FEAT-1 (settings) will need several of these. Today they're unnamed literals. (The watched threshold is now `WATCHED_THRESHOLD` in `player.rs`.)
+  - **Location:** `EPISODE_CLICK_DELAY_MS` (`SeriesDetail.jsx:22`), undo window `10000` (`SeriesDetail.jsx` `confirmDelete`), `MIN_SCAN_DISPLAY_MS` (`App.jsx:20`)
+  - **Problem:** FEAT-1 (settings) will need several of these. Today they're unnamed literals. (Already named: `WATCHED_THRESHOLD`, `SOCKET_WAIT_CAP`/`SOCKET_POLL_INTERVAL` in `player.rs`, `PREFERRED_SEEK_SECS` in `thumbnail.rs`.)
   - **Solution:** Use named `const`s at module top (Rust) or a `src/config.js`, and later the settings table.
 
 - [ ] **DES-8 · Low · Confirmed** — Selection identity is mixed (file path vs id).
@@ -117,12 +117,6 @@ _Nothing picked yet. Move items here when you start them._
     2. Moving S01E03 into a group that already has S01E03 creates duplicate episode numbers with undefined order and auto-play next.
     3. An unknown `target_type` returns `Ok`.
   - **Solution:** Use `season IS NULL`-style sentinel logic (or check `media_type != 'series'`) instead of `season == 0`. Detect collisions and append. Return an error on an unknown type (ARCH-7).
-
-- [ ] **BUG-31 · Low · Potential** — Progress tracking silently gives up on slow mpv startup.
-  - **Location:** `src-tauri/src/commands/player.rs:154-168`
-  - **Problem:** It waits at most 3 s for the socket. On a cold network/USB mount mpv can take longer, so playback works but no progress is saved, with no signal to the user. A `expect()` on `try_clone` at `:191` can also panic the thread.
-  - **Solution:** Retry `connect` until the child exits (check `try_wait`) rather than a fixed count. Replace `expect` with an early return and a log.
-  - **Also (2026-11-11):** when the IPC connect fails, `track_progress` returns early without removing the socket or emitting `video_playback_stopped`, so the UI stays on "Playing" until the next play. Fix by emitting the stopped payload (`{ file_path, session }`) with its session on that path too.
 
 - [ ] **BUG-33 · Low · Confirmed** — Undefined Tailwind classes silently do nothing.
   - **Location:** `animate-in`/`fade-in`/`slide-in-from-top-2` (`SeriesDetail.jsx:484`, `MultiSelectBar.jsx:29`, `GroupActionsMenu.jsx:41`, `RenameGroupModal.jsx:42`, `MergeSuggestionBanner.jsx:23`) need the `tailwindcss-animate` plugin, which isn't installed. `bg-surface-2` (`RenameGroupModal.jsx:62`) isn't a theme token.
@@ -350,6 +344,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-31**: the tracker retries the IPC connect every 200 ms until it succeeds or its own session's mpv is gone (exited or replaced), capped at 30 s (`socket_wait_step`/`wait_for_socket`); `try_clone` failure is logged instead of panicking; every exit path removes the socket and emits `video_playback_stopped {file_path, session}` (`end_session`) before `reap_session`.
 - [x] 2026-11-11 **BUG-46**: every `player_process` access goes through `lock_player` (recovers a poisoned mutex via `into_inner`), so the swaps and the tracker's reap always happen and no mpv is orphaned.
 - [x] 2026-11-11 **DES-1**: `move_episodes` and `set_watched` use one `UPDATE … WHERE id IN (…)` per 500 ids (`update_by_ids`); `reclassify_media` stays a loop.
 - [x] 2026-11-11 **DES-2**: library/group/suggestion queries, reclassify and Continue Watching propagate errors (OptionalExtension for 'no row'); a read error no longer deletes the Continue Watching pointer; reclassify skips unknown ids. `get_episode_meta`/`get_next_episode` keep `Option` but log errors (follow-up DES-9).

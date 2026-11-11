@@ -504,6 +504,103 @@ fn drive_ipc(
     exit
 }
 
+/// Overall cap on waiting for mpv's IPC socket, for an mpv that stays alive
+/// without ever opening it. A slow mount only delays the socket; the wait
+/// otherwise ends as soon as this session's mpv exits.
+const SOCKET_WAIT_CAP: Duration = Duration::from_secs(30);
+const SOCKET_POLL_INTERVAL: Duration = Duration::from_millis(200);
+
+/// One step of the socket wait, decided from the latest connect attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SocketWait {
+    Connected,
+    /// This session's mpv is gone (exited, or killed by a newer play).
+    ChildExited,
+    TimedOut,
+    Retry,
+}
+
+fn socket_wait_step(
+    connected: bool,
+    child_exited: bool,
+    elapsed: Duration,
+    cap: Duration,
+) -> SocketWait {
+    if connected {
+        SocketWait::Connected
+    } else if child_exited {
+        SocketWait::ChildExited
+    } else if elapsed >= cap {
+        SocketWait::TimedOut
+    } else {
+        SocketWait::Retry
+    }
+}
+
+/// Retry `connect` until it succeeds, the child exits, or `SOCKET_WAIT_CAP`
+/// passes. I/O is injected so tests run without mpv or real time.
+fn wait_for_socket<S, E: std::fmt::Display>(
+    mut connect: impl FnMut() -> Result<S, E>,
+    mut child_exited: impl FnMut() -> bool,
+    mut elapsed: impl FnMut() -> Duration,
+    mut sleep: impl FnMut(),
+) -> Result<S, String> {
+    loop {
+        let attempt = connect();
+        // Check the child (takes the player lock) only after a failed connect
+        let exited = attempt.is_err() && child_exited();
+        let step = socket_wait_step(attempt.is_ok(), exited, elapsed(), SOCKET_WAIT_CAP);
+        match (step, attempt) {
+            (_, Ok(stream)) => return Ok(stream),
+            (SocketWait::ChildExited, Err(e)) => {
+                return Err(format!("mpv exited before its socket opened ({e})"))
+            }
+            (SocketWait::TimedOut, Err(e)) => {
+                return Err(format!(
+                    "socket not ready after {}s ({e})",
+                    SOCKET_WAIT_CAP.as_secs()
+                ))
+            }
+            (_, Err(_)) => sleep(),
+        }
+    }
+}
+
+/// Whether `session`'s mpv is no longer running: it exited, or the slot holds
+/// another session (a newer play killed ours) or nothing. A `try_wait` that
+/// sees the exit leaves the status cached in the `Child`, so `reap_session`
+/// still clears the slot afterwards.
+fn session_child_exited(slot: &mut Option<PlayerSession>, session: u64) -> bool {
+    match slot.as_mut() {
+        Some(current) if current.session == session => {
+            !matches!(current.child.try_wait(), Ok(None))
+        }
+        _ => true,
+    }
+}
+
+/// Checks under a brief `player_process` lock; the caller sleeps outside it.
+fn session_exited(app: &AppHandle, session: u64) -> bool {
+    let state = app.state::<AppState>();
+    let mut slot = lock_player(&state.player_process);
+    session_child_exited(&mut slot, session)
+}
+
+/// The tracker is done with this session: remove its socket and tell the
+/// frontend playback stopped. Runs on every exit path, before `play_next_episode`.
+fn end_session(app: &AppHandle, socket_path: &str, file_path: &str, session: u64) {
+    let _ = std::fs::remove_file(socket_path);
+
+    println!("Tracker ended for {}", file_path);
+    let _ = app.emit(
+        "video_playback_stopped",
+        PlaybackPayload {
+            file_path: file_path.to_string(),
+            session,
+        },
+    );
+}
+
 fn track_progress(
     app: AppHandle,
     socket_path: String,
@@ -513,23 +610,33 @@ fn track_progress(
 ) {
     println!("IPC connecting to {}", socket_path);
 
-    // wait for mpv socket
-    for _ in 0..15 {
-        if std::path::Path::new(&socket_path).exists() {
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-
-    let mut stream = match UnixStream::connect(&socket_path) {
+    // Wait for mpv's socket for as long as this session's mpv is alive (slow mounts)
+    let started = Instant::now();
+    let connected = wait_for_socket(
+        || UnixStream::connect(&socket_path),
+        || session_exited(&app, session),
+        || started.elapsed(),
+        || thread::sleep(SOCKET_POLL_INTERVAL),
+    );
+    let mut stream = match connected {
         Ok(s) => s,
-        Err(e) => {
-            println!("Failed to connect IPC: {}", e);
+        Err(reason) => {
+            println!("Failed to connect IPC: {reason}");
+            end_session(&app, &socket_path, &file_path, session);
             return;
         }
     };
 
     println!("IPC connected");
+
+    let reader = match stream.try_clone() {
+        Ok(s) => BufReader::new(s),
+        Err(e) => {
+            println!("Failed to clone IPC stream: {e}");
+            end_session(&app, &socket_path, &file_path, session);
+            return;
+        }
+    };
 
     // 🔹 Instruct mpv to emit events for time-pos and duration changes
     let _ = stream.write_all(br#"{"command":["observe_property", 1, "time-pos"]}"#);
@@ -550,7 +657,6 @@ fn track_progress(
         }
     };
 
-    let reader = BufReader::new(stream.try_clone().expect("Failed to clone UnixStream"));
     let tracker = ProgressTracker::new(previously_watched, Instant::now());
     let exit = drive_ipc(reader.lines(), tracker, Instant::now, |update| {
         persist_progress(&app, conn.as_ref(), &file_path, update.pos, update.watched)
@@ -570,17 +676,7 @@ fn track_progress(
         None
     };
 
-    // CLEANUP SOCKET (IMPORTANT)
-    let _ = std::fs::remove_file(&socket_path);
-
-    println!("Tracker ended for {}", file_path);
-    let _ = app.emit(
-        "video_playback_stopped",
-        PlaybackPayload {
-            file_path: file_path.clone(),
-            session,
-        },
-    );
+    end_session(&app, &socket_path, &file_path, session);
 
     // Emit only after the IPC loop has exited (see TrackerExit::play_next)
     if let Some(next_path) = play_next_after_close {
@@ -732,6 +828,103 @@ mod tests {
         let slot = poisoned_slot(Some(player));
         assert!(reap_if_exited(&mut lock_player(&slot), 3));
         assert!(lock_player(&slot).is_none());
+    }
+
+    #[test]
+    fn socket_wait_decisions() {
+        let cap = Duration::from_secs(30);
+        let early = Duration::from_secs(1);
+        assert_eq!(
+            socket_wait_step(true, false, early, cap),
+            SocketWait::Connected
+        );
+        assert_eq!(
+            socket_wait_step(true, true, cap * 2, cap),
+            SocketWait::Connected,
+            "a connect that succeeds is used even past the cap"
+        );
+        assert_eq!(
+            socket_wait_step(false, true, early, cap),
+            SocketWait::ChildExited
+        );
+        assert_eq!(
+            socket_wait_step(false, false, cap, cap),
+            SocketWait::TimedOut
+        );
+        assert_eq!(
+            socket_wait_step(false, false, early, cap),
+            SocketWait::Retry
+        );
+        assert_eq!(
+            socket_wait_step(false, false, Duration::from_secs(10), cap),
+            SocketWait::Retry,
+            "a slow mpv is waited for well past the old 3 s"
+        );
+    }
+
+    /// Run `wait_for_socket` on a fake clock that advances one poll per sleep.
+    /// Connect succeeds from attempt `connect_on`; the child counts as exited
+    /// from attempt `exit_on`. Returns the result and the number of attempts.
+    fn run_socket_wait(
+        connect_on: Option<u32>,
+        exit_on: Option<u32>,
+    ) -> (Result<u32, String>, u32) {
+        let attempts = std::cell::Cell::new(0u32);
+        let sleeps = std::cell::Cell::new(0u32);
+        let result = wait_for_socket(
+            || {
+                attempts.set(attempts.get() + 1);
+                match connect_on {
+                    Some(n) if attempts.get() >= n => Ok(attempts.get()),
+                    _ => Err("connection refused"),
+                }
+            },
+            || exit_on.is_some_and(|n| attempts.get() >= n),
+            || SOCKET_POLL_INTERVAL * sleeps.get(),
+            || sleeps.set(sleeps.get() + 1),
+        );
+        (result, attempts.get())
+    }
+
+    #[test]
+    fn socket_wait_retries_until_connect_succeeds() {
+        // 100 attempts = 20 s at 200 ms: longer than the old fixed 3 s wait
+        assert_eq!(run_socket_wait(Some(100), None), (Ok(100), 100));
+    }
+
+    #[test]
+    fn socket_wait_stops_when_the_child_exits() {
+        let (result, attempts) = run_socket_wait(None, Some(3));
+        assert!(result.unwrap_err().contains("mpv exited"));
+        assert_eq!(attempts, 3, "no retries after mpv is gone");
+    }
+
+    #[test]
+    fn socket_wait_gives_up_at_the_cap() {
+        let (result, attempts) = run_socket_wait(None, None);
+        assert!(result.unwrap_err().contains("not ready after 30s"));
+        let polls = (SOCKET_WAIT_CAP.as_millis() / SOCKET_POLL_INTERVAL.as_millis()) as u32;
+        assert_eq!(attempts, polls + 1);
+    }
+
+    #[test]
+    fn session_child_exited_checks_only_its_own_mpv() {
+        let mut slot = Some(fake_player(5, "sleep", &["30"]));
+        assert!(!session_child_exited(&mut slot, 5), "own mpv still running");
+        assert!(
+            session_child_exited(&mut slot, 4),
+            "replaced by a newer play"
+        );
+        stop_player(slot.take());
+        assert!(session_child_exited(&mut slot, 5), "empty slot");
+
+        let player = fake_player(6, "true", &[]);
+        wait_until_exited(&player);
+        let mut slot = Some(player);
+        assert!(session_child_exited(&mut slot, 6), "own mpv exited");
+        assert!(slot.is_some(), "left in the slot for reap_session");
+        assert!(reap_if_exited(&mut slot, 6));
+        assert!(slot.is_none(), "and reap_session still clears it");
     }
 
     #[test]
