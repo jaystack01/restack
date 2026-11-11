@@ -58,6 +58,7 @@ export default function SeriesDetail() {
   const [selectedEpisodes, setSelectedEpisodes] = useState(new Set());
   const [collapsedSeasons, setCollapsedSeasons] = useState({});
   const [recentlyDeleted, setRecentlyDeleted] = useState(null);
+  const undoTimerRef = useRef(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [pendingDeleteEpisodes, setPendingDeleteEpisodes] = useState([]);
   const [renamingGroupId, setRenamingGroupId] = useState(null);
@@ -80,6 +81,9 @@ export default function SeriesDetail() {
     );
     return unsub;
   }, []);
+
+  // Don't let the Undo banner timer fire after the page is gone
+  useEffect(() => () => clearTimeout(undoTimerRef.current), []);
 
   // The route reuses this component across series, so drop selection from the previous one
   useEffect(() => {
@@ -388,8 +392,10 @@ export default function SeriesDetail() {
       await deleteEpisodes(mediaIds);
       await fetchLibrary(false);
       setSelectedEpisodes(new Set());
-      const timeoutId = setTimeout(() => setRecentlyDeleted(null), 10000);
-      setRecentlyDeleted({ mediaIds, timeoutId });
+      // A new batch replaces the banner, so its timer must not be cut short by the old one
+      clearTimeout(undoTimerRef.current);
+      undoTimerRef.current = setTimeout(() => setRecentlyDeleted(null), 10000);
+      setRecentlyDeleted({ mediaIds });
     } catch {
       setError("Failed to delete episodes.");
     }
@@ -400,7 +406,7 @@ export default function SeriesDetail() {
     try {
       await restoreEpisodes(recentlyDeleted.mediaIds);
       await fetchLibrary(false);
-      clearTimeout(recentlyDeleted.timeoutId);
+      clearTimeout(undoTimerRef.current);
       setRecentlyDeleted(null);
     } catch {
       setError("Failed to restore episodes.");

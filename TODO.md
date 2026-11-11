@@ -80,7 +80,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Move them to `src/utils/format.js`.
 
 - [ ] **DES-7 · Low · Confirmed** — Magic numbers are spread across layers.
-  - **Location:** thumbnail seek `00:00:15` (`thumbnail.rs:31`), socket wait `15×200ms` (`player.rs:105-110`), `EPISODE_CLICK_DELAY_MS` (`SeriesDetail.jsx:22`), undo window `10000` (`SeriesDetail.jsx:372`), `MIN_SCAN_DISPLAY_MS` (`App.jsx:20`)
+  - **Location:** thumbnail seek `00:00:15` (`thumbnail.rs:31`), socket wait `15×200ms` (`player.rs:105-110`), `EPISODE_CLICK_DELAY_MS` (`SeriesDetail.jsx:22`), undo window `10000` (`SeriesDetail.jsx` `confirmDelete`), `MIN_SCAN_DISPLAY_MS` (`App.jsx:20`)
   - **Problem:** FEAT-1 (settings) will need several of these. Today they're unnamed literals. (The watched threshold is now `WATCHED_THRESHOLD` in `player.rs`.)
   - **Solution:** Use named `const`s at module top (Rust) or a `src/config.js`, and later the settings table.
 
@@ -109,11 +109,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** A user folder called `dist` or `target` (e.g. `~/Videos/target/`) is silently skipped.
   - **Solution:** Match `target`/`dist`/`node_modules` only when the parent contains `Cargo.toml`/`package.json`, or make the exclusion list user-configurable (FEAT-1).
   - **Since 2026-11-11 (BUG-20):** the matching is centralised in `skip_kind()`, and rows already indexed under a skipped `target`/`dist` dir are kept (excluded from reconciliation via `ScanWalk.skipped_dirs`), so changing the rule is data-safe.
-
-- [ ] **BUG-23 · Low · Confirmed** — A second delete within 10 s makes the Undo banner disappear early.
-  - **Location:** `src/pages/SeriesDetail.jsx:372-373`
-  - **Problem:** The previous `timeoutId` is overwritten without `clearTimeout`, so the first timer clears the second banner. Undo also covers only the last batch, and the timer isn't cleared on unmount.
-  - **Solution:** `clearTimeout(recentlyDeleted?.timeoutId)` before setting a new one, and clear it in an unmount effect.
 
 - [ ] **BUG-26 · Low · Confirmed** — "Recent" sort sorts by playback position, not recency.
   - **Location:** `src/pages/SeriesDetail.jsx:127-134`, options `:585-586`
@@ -369,6 +364,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-23**: Undo timer lives in a ref, cleared before each new batch, on Undo and on unmount. Note: Undo still covers only the last batch (by design for now).
 - [x] 2026-11-11 **SEC-4**: mpv gets the file after a `--` separator, and `delete_episodes_cmd`/`restore_episodes_cmd` take media ids resolved by `db::resolve_trash_paths`: live rows only for delete (`deleted_at IS NULL AND missing_since IS NULL`), trashed rows only for restore, and the whole batch is rejected before any Trash move if an id is unknown or ineligible.
 - [x] 2026-11-11 **PERF-15**: `open_db` calls `configure_connection`: explicit 5 s `BUSY_TIMEOUT` and `journal_mode=WAL` (persistent; old DBs convert on first open; a failed switch on a read-only DB is logged, not fatal). Tested on temp-file DBs. Follow-up: BUG-47.
 - [x] 2026-11-11 **BUG-28**: `video_playback_started`/`video_playback_stopped` carry `{ file_path, session }`, and the store clears Playing only when the stop's session matches the current one (`clearPlayingSession`), so a replaced mpv's late stop no longer clears a replay of the same file.
