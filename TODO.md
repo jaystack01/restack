@@ -205,11 +205,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Other local users can see the socket name. mpv creates it with the default umask, so they could connect and send commands to mpv (which can run `run` subprocess commands).
   - **Solution:** Use `$XDG_RUNTIME_DIR` (per-user, mode 0700), falling back to `/tmp`.
 
-- [ ] **SEC-7 · Low · Confirmed** — Unused plugin permissions are granted.
-  - **Location:** `src-tauri/capabilities/default.json:6-10` (`opener:default`, `dialog:default`), `src-tauri/src/lib.rs:34-35`
-  - **Problem:** Neither plugin is used by any frontend code. They widen the IPC surface for nothing.
-  - **Solution:** Remove them (see DEP-2) until FEAT-1 needs the dialog.
-
 - [ ] **SEC-8 · Low · Potential** — Non-UTF-8 paths are stored lossily.
   - **Location:** `src-tauri/src/utils/scanner.rs` (`collect_video_files`, where stored paths are built), `commands/scanner.rs:52-54` (progress file name, `to_string_lossy`)
   - **Problem:** A filename with invalid UTF-8 is stored with U+FFFD. mpv, trash, and restore then target a path that doesn't exist.
@@ -261,11 +256,6 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 📦 Dependencies and Configuration
 
-
-- [ ] **DEP-2 · Low · Confirmed** — Unused plugins are shipped.
-  - **Location:** `package.json:15-16`, `src-tauri/Cargo.toml:22-23`, `lib.rs:34-35`, `capabilities/default.json`
-  - **Problem:** `@tauri-apps/plugin-dialog`/`plugin-opener` and the Rust crates are never used.
-  - **Solution:** Remove them now and re-add the dialog when FEAT-1 is built.
 
 - [ ] **DEP-3 · Low · Confirmed** — Build-only packages are listed as runtime dependencies.
   - **Location:** `package.json:13,24` (`@tailwindcss/vite`, `tailwindcss`)
@@ -360,7 +350,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✨ Features / backlog
 
-- [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold.
+- [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold. Needs the dialog plugin re-added (removed 2026-11-11 by SEC-7/DEP-2): the `tauri-plugin-dialog` crate, `.plugin(tauri_plugin_dialog::init())` in `lib.rs`, the `@tauri-apps/plugin-dialog` npm package, and a narrow `dialog:allow-open` permission in `capabilities/default.json` (not `dialog:default`).
 - [ ] **FEAT-2 (Medium)** Incremental updates via filesystem watching (`notify` crate) instead of full rescans.
 - [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Include a failed startup scan (BUG-14 made per-file failures non-fatal, but a whole failed scan is still silent in `App.jsx`). Silent catches today: `App.jsx:52,126,156`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
 - [ ] **FEAT-4 (Medium)** Startup dependency check for `mpv`, `ffmpeg`, `ffprobe` with a friendly message.
@@ -388,6 +378,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **SEC-7, DEP-2**: removed the unused dialog and opener plugins: their Rust crates and `.plugin(...)` calls in `lib.rs`, the `@tauri-apps/plugin-dialog`/`plugin-opener` npm packages, and the `opener:default`/`dialog:default` capability permissions; both lockfiles updated. FEAT-1 re-adds the dialog with a narrow permission.
 - [x] 2026-11-11 **SEC-6**: Asset-protocol scope is `$APPDATA/thumbnails/**`, which Tauri resolves through `app_data_dir()` like `utils/thumbnail.rs`, so thumbnails work under a custom `$XDG_DATA_HOME` and the identifier is no longer duplicated.
 - [x] 2026-11-05 **BUG-41**: the end of every scan re-keys shows renamed by parser fixes **in place** (`rekey_renamed_shows`, in a savepoint so its errors never fail the scan): same id and route, the old key becomes an alias, a user rename is kept. A group that already owns the new name is absorbed only if it holds just that show's own newer episodes. Two distinct existing shows are never merged automatically (maintainer decision); see BUG-39 for what's left.
 - [x] 2026-11-05 **BUG-5**: `delete_empty_groups` drops groups no media row references (plus their aliases) after every scan and inside merge, move, and reclassify (now transactional). Groups of trashed or missing rows are kept for Undo/remount.

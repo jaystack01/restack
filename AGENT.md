@@ -138,7 +138,7 @@ src/
 
 src-tauri/src/
   main.rs                    calls restack_lib::run()
-  lib.rs                     Plugins, setup (open DB, init_schema, migrate_existing_groups), command registry, `run_blocking`
+  lib.rs                     Builder setup, no plugins (open DB, init_schema, migrate_existing_groups), command registry, `run_blocking`
   models.rs                  Serde structs returned to the frontend (camelCase), `AppState`, `ScanGuard`
   db.rs                      ALL SQL: schema/migrations, upserts, queries, groups, progress, delete/restore
   commands/scanner.rs        scan_user_storage, scan_and_sync, get_scan_roots
