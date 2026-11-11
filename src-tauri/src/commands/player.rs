@@ -108,6 +108,24 @@ pub async fn play_episode(
     run_blocking(move || start_playback(app, file_path, start_seconds)).await
 }
 
+/// mpv's arguments: every option first, then `--`, then the file, so a path
+/// starting with `-` can never be parsed as an option.
+fn mpv_args(file_path: &str, socket_path: &str, start: u64) -> Vec<String> {
+    let mut args = vec![
+        format!("--input-ipc-server={socket_path}"),
+        "--keep-open=no".to_string(),
+        "--no-resume-playback".to_string(), // avoid mpv watch-later vs our DB resume
+        "--script-opts=autoload-disabled=yes".to_string(), // disable community autoload scripts
+        "--force-window=no".to_string(),    // prevents weird lingering window states
+    ];
+    if start > 0 {
+        args.push(format!("--start={start}"));
+    }
+    args.push("--".to_string());
+    args.push(file_path.to_string());
+    args
+}
+
 /// Kill a replaced mpv and reap it. Called outside the `player_process` lock.
 fn stop_player(old_process: Option<Child>) {
     if let Some(mut old_process) = old_process {
@@ -134,17 +152,7 @@ fn start_playback(
     let socket_path = format!("/tmp/mpv-{}.sock", uuid::Uuid::new_v4());
 
     let mut cmd = Command::new("mpv");
-
-    cmd.arg(&file_path)
-        .arg(format!("--input-ipc-server={}", socket_path))
-        .arg("--keep-open=no")
-        .arg("--no-resume-playback") // avoid mpv watch-later vs our DB resume
-        .arg("--script-opts=autoload-disabled=yes") // disable community autoload scripts
-        .arg("--force-window=no"); // prevents weird lingering window states
-
-    if start > 0 {
-        cmd.arg(format!("--start={}", start));
-    }
+    cmd.args(mpv_args(&file_path, &socket_path, start));
 
     // Only swap the Child under the lock; kill/wait and spawn happen outside it
     let old_process = state
@@ -475,6 +483,47 @@ fn track_progress(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mpv_args_end_with_separator_and_path() {
+        let args = mpv_args("/videos/Show S01E01.mkv", "/tmp/mpv-x.sock", 0);
+        assert_eq!(
+            args,
+            [
+                "--input-ipc-server=/tmp/mpv-x.sock",
+                "--keep-open=no",
+                "--no-resume-playback",
+                "--script-opts=autoload-disabled=yes",
+                "--force-window=no",
+                "--",
+                "/videos/Show S01E01.mkv",
+            ]
+        );
+    }
+
+    #[test]
+    fn mpv_start_option_comes_before_the_separator() {
+        let args = mpv_args("/videos/a.mkv", "/tmp/mpv-x.sock", 42);
+        let sep = args.iter().position(|a| a == "--").unwrap();
+        assert_eq!(sep, args.len() - 2, "`--` immediately precedes the path");
+        assert_eq!(args[sep + 1], "/videos/a.mkv");
+        let start = args.iter().position(|a| a == "--start=42").unwrap();
+        assert!(start < sep);
+    }
+
+    #[test]
+    fn mpv_path_starting_with_dash_stays_after_separator() {
+        let args = mpv_args("--script=/tmp/evil.lua", "/tmp/mpv-x.sock", 10);
+        assert_eq!(args[args.len() - 2], "--");
+        assert_eq!(args[args.len() - 1], "--script=/tmp/evil.lua");
+        assert_eq!(
+            args.iter()
+                .filter(|a| *a == "--script=/tmp/evil.lua")
+                .count(),
+            1,
+            "the path appears only as the positional file argument"
+        );
+    }
 
     #[test]
     fn watched_latches_once_reached() {

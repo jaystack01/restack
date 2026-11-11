@@ -199,9 +199,10 @@ _Nothing picked yet. Move items here when you start them._
 
 
 - [ ] **SEC-4 · Medium · Potential** — Destructive commands trust arbitrary paths from the webview.
-  - **Location:** `src-tauri/src/commands/library.rs` (`delete_episodes_cmd`, `restore_episodes_cmd`), `commands/player.rs:84-149` (`play_episode` / `start_playback`)
-  - **Problem:** Any string sent from JS is trashed or handed to `mpv` as an argument. The CSP is strict and there's no remote content, so exploitation needs an XSS first. But this is the app's only file-destroying path and it does no validation.
-  - **Solution:** Have the commands accept `media_ids`, resolve paths from the DB, and refuse paths not in `media`. For mpv, pass `--` before the file argument so a path can never be parsed as an option.
+  - **Location:** `src-tauri/src/commands/library.rs` (`delete_episodes_cmd`, `restore_episodes_cmd`)
+  - **Problem:** Any string sent from JS is trashed or restored. The CSP is strict and there's no remote content, so exploitation needs an XSS first. But this is the app's only file-destroying path and it does no validation.
+  - **Done 2026-11-11 (mpv half):** `play_episode` builds its arguments with the pure `mpv_args`, which puts the file last after a `--` separator, so a path can never be parsed as an mpv option.
+  - **Solution (remaining):** Have delete/restore accept `media_ids`, resolve paths from the DB, and refuse anything not in `media`.
 
 - [ ] **SEC-5 · Low · Confirmed** — The mpv IPC socket is in world-readable `/tmp`.
   - **Location:** `src-tauri/src/commands/player.rs:111`
