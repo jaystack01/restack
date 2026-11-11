@@ -1,12 +1,28 @@
 use serde::Serialize;
 use std::process::Child;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
 pub struct AppState {
-    pub player_process: Mutex<Option<Child>>,
+    /// The running mpv, if any, tagged with the playback session that started it.
+    pub player_process: Mutex<Option<PlayerSession>>,
     /// Set while a library scan runs; see `ScanGuard`.
     pub scan_running: AtomicBool,
+}
+
+/// An mpv child and the playback session (`next_playback_session`) it belongs to,
+/// so a tracker only ever reaps its own mpv, never a newer one.
+pub struct PlayerSession {
+    pub session: u64,
+    pub child: Child,
+}
+
+/// Playback generation counter; each `play_episode` takes the next value.
+static PLAYBACK_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Next playback session id: strictly increasing for the process, starting at 1.
+pub fn next_playback_session() -> u64 {
+    PLAYBACK_GENERATION.fetch_add(1, Ordering::Relaxed) + 1
 }
 
 /// Holds the "scan running" flag; clears it on drop, so the flag is released on
@@ -138,6 +154,16 @@ pub struct LibraryResponse {
 mod tests {
     use super::*;
     use std::panic::{catch_unwind, AssertUnwindSafe};
+
+    #[test]
+    fn playback_sessions_strictly_increase() {
+        // Other tests may take sessions concurrently; ours still only go up
+        let first = next_playback_session();
+        let second = next_playback_session();
+        let third = next_playback_session();
+        assert!(first >= 1, "0 is never a session");
+        assert!(first < second && second < third);
+    }
 
     #[test]
     fn scan_guard_is_exclusive_and_released_on_drop() {

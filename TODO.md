@@ -138,11 +138,6 @@ _Nothing picked yet. Move items here when you start them._
     3. An unknown `target_type` returns `Ok`.
   - **Solution:** Use `season IS NULL`-style sentinel logic (or check `media_type != 'series'`) instead of `season == 0`. Detect collisions and append. Return an error on an unknown type (ARCH-7).
 
-- [ ] **BUG-30 · Low · Confirmed** — mpv is never reaped after it exits on its own.
-  - **Location:** `src-tauri/src/commands/player.rs:134-136` (`start_playback` stores the `Child`), `models.rs:6-10`
-  - **Problem:** The `Child` stays in `AppState` until the next `play_episode`, so a zombie `mpv` process lingers.
-  - **Solution:** Have the tracker thread `try_wait()`/`wait()` and clear `AppState.player_process` when the IPC loop ends (pass the `AppHandle` and use `app.state::<AppState>()`).
-
 - [ ] **BUG-31 · Low · Potential** — Progress tracking silently gives up on slow mpv startup.
   - **Location:** `src-tauri/src/commands/player.rs:154-168`
   - **Problem:** It waits at most 3 s for the socket. On a cold network/USB mount mpv can take longer, so playback works but no progress is saved, with no signal to the user. A `expect()` on `try_clone` at `:191` can also panic the thread.
@@ -192,6 +187,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/utils/scanner.rs` (`discover_default_scan_roots`)
   - **Problem:** Every dir directly in `/mnt` becomes a root, including hidden ones like `/mnt/.snapshots`, and roots are walked fully (skip rules only apply below a root).
   - **Solution:** Skip hidden entries when listing `/mnt`.
+
+- [ ] **BUG-46 · Low · Potential** — A poisoned `player_process` lock orphans mpv.
+  - **Location:** `src-tauri/src/commands/player.rs` `start_playback` (`state.player_process.lock().ok()` on the swap)
+  - **Problem:** If the mutex is ever poisoned (a panic while it is held), `.lock().ok()` yields `None`: the old mpv is not killed, and the new `Child` is dropped without being stored, so it keeps running untracked and is never reaped.
+  - **Solution:** Use `lock().unwrap_or_else(|e| e.into_inner())` so the swap still happens on a poisoned lock.
 
 ## 🔐 Security and Data Integrity
 
@@ -378,6 +378,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-30**: each playback gets a session id (`next_playback_session`), `AppState.player_process` stores `PlayerSession { session, child }`, and the tracker's `reap_session` `try_wait`s only its own session's mpv after the post-loop events and clears the slot once it exited, so no zombie lingers and a newer mpv is never touched. Follow-up: BUG-46.
 - [x] 2026-11-11 **SEC-5**: the mpv IPC socket is created in `$XDG_RUNTIME_DIR` (per-user, mode 0700) when it is an absolute existing dir, falling back to `/tmp` (`mpv_socket_dir`, tested).
 - [x] 2026-11-11 **BUG-20**: Walk skips hidden dirs below a root (a hidden root is still walked); `/run/media/<user>` added to default roots; user name from `$USER`/`$LOGNAME` before the `$HOME` basename. Skipped non-trash subtrees (`ScanWalk.skipped_dirs`) are excluded from reconciliation, so rows indexed there earlier are left untouched. Follow-ups: BUG-44, BUG-45.
 - [x] 2026-11-11 **SEC-7, DEP-2**: removed the unused dialog and opener plugins: their Rust crates and `.plugin(...)` calls in `lib.rs`, the `@tauri-apps/plugin-dialog`/`plugin-opener` npm packages, and the `opener:default`/`dialog:default` capability permissions; both lockfiles updated. FEAT-1 re-adds the dialog with a narrow permission.

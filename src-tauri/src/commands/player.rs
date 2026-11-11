@@ -2,13 +2,13 @@ use crate::db::{
     get_episode_meta, get_next_episode, get_playback_state, init_schema, open_db, set_watched,
     update_progress,
 };
-use crate::models::AppState;
+use crate::models::{next_playback_session, AppState, PlayerSession};
 use crate::run_blocking;
 use rusqlite::Connection;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command};
+use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -145,11 +145,56 @@ fn mpv_args(file_path: &str, socket_path: &str, start: u64) -> Vec<String> {
 }
 
 /// Kill a replaced mpv and reap it. Called outside the `player_process` lock.
-fn stop_player(old_process: Option<Child>) {
-    if let Some(mut old_process) = old_process {
+fn stop_player(old_process: Option<PlayerSession>) {
+    if let Some(PlayerSession { mut child, .. }) = old_process {
         println!("Killing previous mpv process...");
-        let _ = old_process.kill();
-        let _ = old_process.wait();
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+}
+
+/// How long a finished tracker keeps checking for its mpv to exit before
+/// leaving it to the next `play_episode` (mpv exits just after `end-file`).
+const REAP_ATTEMPTS: u32 = 20;
+const REAP_INTERVAL: Duration = Duration::from_millis(100);
+
+/// Reap `session`'s mpv if it has exited, by taking it out of the slot. Never
+/// touches a newer session's mpv and never blocks (`try_wait` only). Returns
+/// `true` when there is nothing left to wait for.
+fn reap_if_exited(slot: &mut Option<PlayerSession>, session: u64) -> bool {
+    let Some(current) = slot.as_mut() else {
+        return true; // already replaced and reaped by a newer play
+    };
+    if current.session != session {
+        return true; // a newer session's mpv: not ours to reap
+    }
+    match current.child.try_wait() {
+        Ok(Some(_)) => {
+            *slot = None;
+            true
+        }
+        Ok(None) => false,
+        Err(e) => {
+            println!("Failed to check mpv status: {e}");
+            true
+        }
+    }
+}
+
+/// Called by the tracker once it is done: reap its own mpv so no zombie stays
+/// in `AppState` until the next play. Takes the lock only for each check and
+/// sleeps outside it.
+fn reap_session(app: &AppHandle, session: u64) {
+    let state = app.state::<AppState>();
+    for _ in 0..REAP_ATTEMPTS {
+        let done = match state.player_process.lock() {
+            Ok(mut slot) => reap_if_exited(&mut slot, session),
+            Err(_) => true,
+        };
+        if done {
+            return;
+        }
+        thread::sleep(REAP_INTERVAL);
     }
 }
 
@@ -186,13 +231,14 @@ fn start_playback(
     let child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start mpv: {}", e))?;
+    let session = next_playback_session();
 
     // A concurrent play_episode may have stored its mpv meanwhile: the newest wins
     let raced = state
         .player_process
         .lock()
         .ok()
-        .and_then(|mut lock| lock.replace(child));
+        .and_then(|mut lock| lock.replace(PlayerSession { session, child }));
     stop_player(raced);
 
     // Notify frontend
@@ -203,7 +249,14 @@ fn start_playback(
     let file_clone = file_path.clone();
 
     thread::spawn(move || {
-        track_progress(app_handle, socket_path, file_clone, previously_watched);
+        track_progress(
+            app_handle.clone(),
+            socket_path,
+            file_clone,
+            previously_watched,
+        );
+        // After every exit path (including a failed IPC connect) and after the events
+        reap_session(&app_handle, session);
     });
 
     Ok(())
@@ -544,6 +597,63 @@ mod tests {
             1,
             "the path appears only as the positional file argument"
         );
+    }
+
+    /// A stand-in child process (never mpv).
+    fn fake_player(session: u64, program: &str, args: &[&str]) -> PlayerSession {
+        let child = Command::new(program).args(args).spawn().unwrap();
+        PlayerSession { session, child }
+    }
+
+    /// Wait until `player` has exited, without reaping it (`try_wait` would).
+    fn wait_until_exited(player: &PlayerSession) {
+        let proc_stat = format!("/proc/{}/stat", player.child.id());
+        for _ in 0..500 {
+            let stat = std::fs::read_to_string(&proc_stat).unwrap_or_default();
+            if stat.contains(") Z ") {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        panic!("child did not exit");
+    }
+
+    #[test]
+    fn reap_takes_out_own_exited_player() {
+        let player = fake_player(7, "true", &[]);
+        wait_until_exited(&player);
+        let mut slot = Some(player);
+        assert!(reap_if_exited(&mut slot, 7));
+        assert!(slot.is_none(), "exited mpv is reaped and cleared");
+    }
+
+    #[test]
+    fn reap_leaves_own_running_player_and_asks_to_retry() {
+        let mut slot = Some(fake_player(7, "sleep", &["30"]));
+        assert!(!reap_if_exited(&mut slot, 7), "still running: check again");
+        assert!(slot.is_some());
+        stop_player(slot.take());
+    }
+
+    #[test]
+    fn reap_never_touches_a_newer_session() {
+        let newer = fake_player(8, "true", &[]);
+        wait_until_exited(&newer);
+        let mut slot = Some(newer);
+        assert!(reap_if_exited(&mut slot, 7), "nothing of ours to wait for");
+        let newer = slot.as_mut().expect("newer session's mpv stays stored");
+        assert_eq!(newer.session, 8);
+        assert!(
+            newer.child.try_wait().unwrap().is_some(),
+            "and was not reaped by the old tracker"
+        );
+    }
+
+    #[test]
+    fn reap_with_empty_slot_is_done() {
+        let mut slot = None;
+        assert!(reap_if_exited(&mut slot, 7));
+        assert!(slot.is_none());
     }
 
     #[test]

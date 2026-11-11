@@ -139,7 +139,7 @@ src/
 src-tauri/src/
   main.rs                    calls restack_lib::run()
   lib.rs                     Builder setup, no plugins (open DB, init_schema, migrate_existing_groups), command registry, `run_blocking`
-  models.rs                  Serde structs returned to the frontend (camelCase), `AppState`, `ScanGuard`
+  models.rs                  Serde structs returned to the frontend (camelCase), `AppState`, `PlayerSession`, `next_playback_session`, `ScanGuard`
   db.rs                      ALL SQL: schema/migrations, upserts, queries, groups, progress, delete/restore
   commands/scanner.rs        scan_user_storage, scan_and_sync, get_scan_roots
   commands/library.rs        get_library_grouped, continue watching, delete/restore, reclassify
@@ -180,7 +180,7 @@ media (
 
 **Migrations** are additive and live in `init_schema()`: check `PRAGMA table_info(media)` and `ALTER TABLE ... ADD COLUMN` if missing. Follow that pattern; there is no migration framework and existing user DBs must keep working. Indexes on migrated columns (`idx_media_group_season_episode`, `idx_media_type_live`) must be created after the `ADD COLUMN` migrations in `init_schema()`, or older DBs fail to open.
 
-**Connection model**: every command calls `open_db(&app)` + `init_schema(&conn)` fresh. There is no pool or shared connection in `AppState` (which holds the mpv `Child` and the `scan_running` flag). Keep that pattern unless you're deliberately refactoring it everywhere.
+**Connection model**: every command calls `open_db(&app)` + `init_schema(&conn)` fresh. There is no pool or shared connection in `AppState` (which holds the current mpv as a `PlayerSession` and the `scan_running` flag). Keep that pattern unless you're deliberately refactoring it everywhere.
 
 **Errors**: all DB/command functions return `Result<T, String>` with `map_err(|e| format!("Failed to …: {e}"))`. Match that style.
 
@@ -239,7 +239,9 @@ When adding a pattern, insert it at the right priority and think about false pos
 - On `end-file` with reason `eof`, `TrackerExit::play_next` is set. Only after `drive_ipc` returns does `track_progress` look up the next episode in the group, remove the socket, emit `video_playback_stopped`, and then emit `play_next_episode`. That ordering avoids a Broken-pipe race, so don't move it.
 - `update_progress` also sets `app_state.last_watched_episode_id` for **series** rows only, which drives Continue Watching. Manual mark watched/unwatched goes through `set_watched_cmd` (one transaction, position reset to 0) and never moves that pointer.
 - Auto-play next (`get_next_episode`) and Up Next skip trashed, missing, and non-series rows.
-- `play_episode` (body in `start_playback`) only swaps the `Child` while holding the `player_process` lock. Killing the old mpv and spawning the new one happen outside it, and if two plays race, the newest mpv is kept and the replaced one is killed.
+- Each `play_episode` takes a session id from `models::next_playback_session()` (a process-wide, strictly increasing static `AtomicU64`). `AppState.player_process` holds `Option<PlayerSession { session, child }>`.
+- `play_episode` (body in `start_playback`) only swaps the `PlayerSession` while holding the `player_process` lock. Killing the old mpv and spawning the new one happen outside it, and if two plays race, the newest mpv is kept and the replaced one is killed.
+- After the post-loop events, the tracker calls `reap_session`: under the lock it `try_wait`s only its own session's child and clears the slot once mpv has exited, sleeping outside the lock between checks (at most 20 × 100 ms). It never kills or reaps a newer session's mpv, so no zombie mpv lingers until the next play.
 
 ### Thumbnails (`utils/thumbnail.rs`)
 
