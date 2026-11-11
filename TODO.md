@@ -190,6 +190,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** If the mutex is ever poisoned (a panic while it is held), `.lock().ok()` yields `None`: the old mpv is not killed, and the new `Child` is dropped without being stored, so it keeps running untracked and is never reaped.
   - **Solution:** Use `lock().unwrap_or_else(|e| e.into_inner())` so the swap still happens on a poisoned lock.
 
+- [ ] **BUG-47 · Medium · Potential** — Deferred read-then-write transactions fail at once with `SQLITE_BUSY_SNAPSHOT` in WAL.
+  - **Location:** `src-tauri/src/commands/scanner.rs` (`UpsertBatch`, `unchecked_transaction`); `src-tauri/src/db.rs` `migrate_existing_groups`, `merge_groups`, `move_episodes`, `reclassify_media`, `set_watched`, `sync_missing_media` (all `unchecked_transaction`)
+  - **Problem:** Since PERF-15 the DB runs in WAL. These transactions are deferred: they start as readers and upgrade to writers on their first write. In WAL, if another connection committed between the read and the upgrade, SQLite returns `SQLITE_BUSY_SNAPSHOT` immediately, without waiting for the busy timeout. Example: a merge or reclassify that reads groups while a scan batch commits.
+  - **Solution:** Begin read-then-write transactions with `TransactionBehavior::Immediate` (`Transaction::new_unchecked(conn, TransactionBehavior::Immediate)`), so the write lock is taken up front and the busy timeout applies.
+
 ## 🔐 Security and Data Integrity
 
 
@@ -220,7 +225,7 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **PERF-4 · Low · Improvement** — Every command reopens the SQLite connection and re-runs `init_schema` (about 6 statements plus `PRAGMA table_info`).
   - **Location:** all command wrappers (the player tracker already reuses one connection per playback since PERF-6)
-  - **Solution:** Hold one `Mutex<Connection>` in `AppState`. Run schema init once at startup. Enable `PRAGMA journal_mode=WAL` (currently `delete`) so the player thread doesn't contend with scans.
+  - **Solution:** Hold one `Mutex<Connection>` in `AppState` and run schema init once at startup. (WAL and an explicit busy timeout are already set on every connection since PERF-15.)
 
 - [ ] **PERF-5 · Low · Improvement** — Merge suggestions are O(n²) Levenshtein over all groups.
   - **Location:** `src-tauri/src/db.rs:589-606`
@@ -240,11 +245,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/commands/scanner.rs:111-113` → `db::sync_missing_media` (row deleted, jpg kept)
   - **Problem:** Evidence: the local thumbnails dir has 48 files while 2 rows reference a thumbnail.
   - **Solution:** Delete the jpg when its row is purged, and/or sweep files not referenced by any row at the end of a scan.
-
-- [ ] **PERF-15 · Medium · Potential** — App connections rely on the implicit busy timeout and the rollback journal.
-  - **Location:** `src-tauri/src/db.rs:18-21` (`open_db`); `src-tauri/src/commands/player.rs` `track_progress`; every command in `src-tauri/src/commands/*.rs` (on the blocking pool since PERF-1)
-  - **Problem:** The scanner and the mpv tracker write through separate connections in the default rollback-journal mode. Since PERF-7 scans hold short write transactions (at most 500 rows or 1 s, committed before every probe). Only rusqlite's implicit 5 s default busy timeout stops a progress write from failing with `SQLITE_BUSY` while a batch commits; nothing in the code states that. Readers (`get_library_grouped` during a scan) also block on the writer, and each batch commit pays a full rollback-journal fsync. Since PERF-1, UI commands (rename, merge, move, set watched, reclassify, `get_library_grouped`) run at the same time as a scan instead of queueing behind it on the main thread, so each one also depends on that 5 s timeout while a batch (up to 1 s or 500 rows) is open. Delete/restore are excluded: they are mutually exclusive with scans.
-  - **Solution:** In `open_db`, set an explicit `busy_timeout` and `PRAGMA journal_mode=WAL` (see PERF-4). Verify with existing user DBs.
 
 - [ ] **PERF-16 · Low · Potential** — Concurrent scans and Trash operations are rejected, not queued.
   - **Location:** `src-tauri/src/models.rs` `ScanGuard`, `src-tauri/src/commands/scanner.rs` `scan_roots_and_sync`, `src-tauri/src/commands/library.rs` `exclusive_with_scan`; `src/pages/SeriesDetail.jsx` (delete/Undo error handling)
@@ -375,6 +375,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **PERF-15**: `open_db` calls `configure_connection`: explicit 5 s `BUSY_TIMEOUT` and `journal_mode=WAL` (persistent; old DBs convert on first open; a failed switch on a read-only DB is logged, not fatal). Tested on temp-file DBs. Follow-up: BUG-47.
 - [x] 2026-11-11 **BUG-28**: `video_playback_started`/`video_playback_stopped` carry `{ file_path, session }`, and the store clears Playing only when the stop's session matches the current one (`clearPlayingSession`), so a replaced mpv's late stop no longer clears a replay of the same file.
 - [x] 2026-11-11 **BUG-30**: each playback gets a session id (`next_playback_session`), `AppState.player_process` stores `PlayerSession { session, child }`, and the tracker's `reap_session` `try_wait`s only its own session's mpv after the post-loop events and clears the slot once it exited, so no zombie lingers and a newer mpv is never touched. Follow-up: BUG-46.
 - [x] 2026-11-11 **SEC-5**: the mpv IPC socket is created in `$XDG_RUNTIME_DIR` (per-user, mode 0700) when it is an absolute existing dir, falling back to `/tmp` (`mpv_socket_dir`, tested).

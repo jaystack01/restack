@@ -6,6 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 use tauri::{AppHandle, Manager};
 
 fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
@@ -18,9 +19,35 @@ fn db_path(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(app_dir.join("restack.db"))
 }
 
+/// How long a connection waits for another connection's write lock before failing with
+/// `SQLITE_BUSY`. Scan batches hold the lock for at most ~1 s, which leaves a wide margin
+/// for the mpv tracker and UI commands writing at the same time.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+
 pub fn open_db(app: &AppHandle) -> Result<Connection, String> {
     let path = db_path(app)?;
-    Connection::open(path).map_err(|e| format!("Failed to open SQLite database: {e}"))
+    let conn =
+        Connection::open(path).map_err(|e| format!("Failed to open SQLite database: {e}"))?;
+    configure_connection(&conn)?;
+    Ok(conn)
+}
+
+/// Settings every app connection needs: an explicit busy timeout, and WAL so readers never
+/// block on the writer and batch commits skip the rollback-journal fsync. WAL is stored in
+/// the file, so setting it again on each open is a cheap no-op.
+fn configure_connection(conn: &Connection) -> Result<(), String> {
+    conn.busy_timeout(BUSY_TIMEOUT)
+        .map_err(|e| format!("Failed to set SQLite busy timeout: {e}"))?;
+    // WAL is an optimisation, never a reason to refuse a DB: on a read-only file or
+    // directory the pragma errors, but reads in the old journal mode still work.
+    // SQLite also keeps the old mode where WAL isn't supported; in-memory databases
+    // always report "memory"
+    match conn.query_row("PRAGMA journal_mode = WAL", [], |r| r.get::<_, String>(0)) {
+        Ok(mode) if mode.eq_ignore_ascii_case("wal") || mode.eq_ignore_ascii_case("memory") => {}
+        Ok(mode) => eprintln!("SQLite journal mode is {mode}, not wal"),
+        Err(e) => eprintln!("Failed to enable WAL journal mode, keeping the current one: {e}"),
+    }
+    Ok(())
 }
 
 pub fn init_schema(conn: &Connection) -> Result<(), String> {
@@ -2483,5 +2510,167 @@ mod tests {
             (s.episode_count_b, s.episode_count_a)
         };
         assert_eq!(counts, (1, 1));
+    }
+
+    /// A database file in a fresh temp dir (WAL needs a real file), removed on drop.
+    struct TempDb(PathBuf);
+
+    impl TempDb {
+        fn new(name: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("restack-db-test-{name}-{}", std::process::id()));
+            let _ = fs::remove_dir_all(&dir);
+            fs::create_dir_all(&dir).unwrap();
+            TempDb(dir)
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("restack.db")
+        }
+
+        /// Open the way `open_db` does, without an `AppHandle`.
+        fn open(&self) -> Connection {
+            let conn = Connection::open(self.path()).unwrap();
+            configure_connection(&conn).unwrap();
+            conn
+        }
+    }
+
+    impl Drop for TempDb {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[test]
+    fn connections_use_wal_and_an_explicit_busy_timeout() {
+        let db = TempDb::new("wal");
+        let conn = db.open();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        let timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, BUSY_TIMEOUT.as_millis() as i64);
+
+        // In-memory databases can't use WAL, which must not be an error
+        configure_connection(&Connection::open_in_memory().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn old_rollback_journal_file_db_opens_in_wal() {
+        let db = TempDb::new("old-file");
+        {
+            // A DB written by an older build: rollback journal, pre-group schema
+            let old = Connection::open(db.path()).unwrap();
+            old.execute_batch(
+                "CREATE TABLE media (
+                    id INTEGER PRIMARY KEY,
+                    file_path TEXT NOT NULL UNIQUE,
+                    show_name TEXT NOT NULL,
+                    season INTEGER NOT NULL,
+                    episode INTEGER NOT NULL,
+                    title TEXT,
+                    duration INTEGER NOT NULL DEFAULT 0,
+                    last_position INTEGER NOT NULL DEFAULT 0,
+                    watched INTEGER NOT NULL DEFAULT 0,
+                    thumbnail_path TEXT
+                );
+                INSERT INTO media (file_path, show_name, season, episode, last_position)
+                VALUES ('/v/old.s01e01.mkv', 'Old Show', 1, 1, 42);",
+            )
+            .unwrap();
+            let mode: String = old
+                .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(mode, "delete");
+        }
+
+        let conn = db.open();
+        init_schema(&conn).unwrap();
+        migrate_existing_groups(&conn).unwrap();
+        assert_eq!(row::<i64>(&conn, "/v/old.s01e01.mkv", "last_position"), 42);
+        assert_eq!(library_paths(&conn), vec!["/v/old.s01e01.mkv"]);
+        drop(conn);
+
+        // WAL sticks to the file, and reopening it works
+        let again = db.open();
+        init_schema(&again).unwrap();
+        let mode: String = again
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "wal");
+        assert_eq!(library_paths(&again), vec!["/v/old.s01e01.mkv"]);
+    }
+
+    #[test]
+    fn readers_and_the_writer_do_not_block_each_other() {
+        let db = TempDb::new("concurrent");
+        let writer = db.open();
+        init_schema(&writer).unwrap();
+        upsert_episode(&writer, "/v/a.s01e01.mkv", &ep("A", 1, 1), 100, None).unwrap();
+        let reader = db.open();
+
+        // A reader sees the last committed state while a write transaction is open
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        update_progress(&writer, "/v/a.s01e01.mkv", 50, false).unwrap();
+        assert_eq!(row::<i64>(&reader, "/v/a.s01e01.mkv", "last_position"), 0);
+        writer.execute_batch("COMMIT").unwrap();
+        assert_eq!(row::<i64>(&reader, "/v/a.s01e01.mkv", "last_position"), 50);
+
+        // And an open read transaction doesn't stop the writer from committing
+        reader.execute_batch("BEGIN").unwrap();
+        assert_eq!(row::<i64>(&reader, "/v/a.s01e01.mkv", "last_position"), 50);
+        let started = std::time::Instant::now();
+        update_progress(&writer, "/v/a.s01e01.mkv", 70, false).unwrap();
+        assert!(started.elapsed() < BUSY_TIMEOUT);
+        assert_eq!(row::<i64>(&reader, "/v/a.s01e01.mkv", "last_position"), 50);
+        reader.execute_batch("COMMIT").unwrap();
+        assert_eq!(row::<i64>(&reader, "/v/a.s01e01.mkv", "last_position"), 70);
+    }
+
+    /// Sets a path's mode and puts the old one back on drop, so a failing test still lets
+    /// `TempDb` clean up.
+    struct ModeGuard(PathBuf, u32);
+
+    impl ModeGuard {
+        fn set(path: PathBuf, mode: u32) -> Self {
+            use std::os::unix::fs::PermissionsExt;
+            let old = fs::metadata(&path).unwrap().permissions().mode();
+            fs::set_permissions(&path, fs::Permissions::from_mode(mode)).unwrap();
+            ModeGuard(path, old)
+        }
+    }
+
+    impl Drop for ModeGuard {
+        fn drop(&mut self) {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.0, fs::Permissions::from_mode(self.1));
+        }
+    }
+
+    #[test]
+    fn read_only_database_still_opens_when_wal_fails() {
+        let db = TempDb::new("read-only");
+        {
+            // Written by an older build in the rollback journal, so the switch to WAL
+            // would need a write
+            let old = Connection::open(db.path()).unwrap();
+            init_schema(&old).unwrap();
+            upsert_episode(&old, "/v/a.s01e01.mkv", &ep("A", 1, 1), 100, None).unwrap();
+        }
+
+        // Read-only file in a read-only directory
+        let _file = ModeGuard::set(db.path(), 0o444);
+        let _dir = ModeGuard::set(db.0.clone(), 0o555);
+
+        let conn = db.open();
+        let timeout: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(timeout, BUSY_TIMEOUT.as_millis() as i64);
+        assert_eq!(library_paths(&conn), vec!["/v/a.s01e01.mkv"]);
     }
 }
