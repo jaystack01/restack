@@ -11,7 +11,7 @@ Authoritative context for any AI agent or contributor working in this repo. It d
 It is *not* a player, streaming server, or media center. Keep it offline-first, lightweight, fast, and minimal.
 
 - npm package / Cargo crate: `restack` (lib crate: `restack_lib`)
-- Tauri identifier: `com.jay.restack`
+- Tauri identifier: `com.jay.restack`. Changing it moves the app data dir, which orphans the user's DB and thumbnails.
 - Runtime deps on the host: `mpv`, `ffmpeg`, `ffprobe` (all must be on `PATH`)
 
 ---
@@ -244,7 +244,7 @@ When adding a pattern, insert it at the right priority and think about false pos
 ### Thumbnails (`utils/thumbnail.rs`)
 
 - Saved to `$APPDATA/thumbnails/<uuid-v5(file_path)>.jpg`, frame at **00:00:15**. ffmpeg (60 s timeout) writes `<uuid>.jpg.part`, which is renamed into place only on success and removed otherwise, so an existing `<uuid>.jpg` is always complete.
-- Served to the webview via the asset protocol (`convertFileSrc`). `tauri.conf.json` scopes it to `$HOME/.local/share/com.jay.restack/thumbnails/**` and the CSP allows `asset:`/`http://asset.localhost`. **Changing the app identifier breaks thumbnails** unless you update that scope too.
+- Served to the webview via the asset protocol (`convertFileSrc`). `tauri.conf.json` scopes it to `$APPDATA/thumbnails/**`, which Tauri resolves through `app_data_dir()` (the dir `utils/thumbnail.rs` writes to), so it follows the identifier and `$XDG_DATA_HOME`. The CSP allows `asset:`/`http://asset.localhost`.
 
 ### Delete / restore
 

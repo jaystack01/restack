@@ -205,11 +205,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Other local users can see the socket name. mpv creates it with the default umask, so they could connect and send commands to mpv (which can run `run` subprocess commands).
   - **Solution:** Use `$XDG_RUNTIME_DIR` (per-user, mode 0700), falling back to `/tmp`.
 
-- [ ] **SEC-6 · Medium · Confirmed** — The asset-protocol scope hardcodes the data dir.
-  - **Location:** `src-tauri/tauri.conf.json:25` (`$HOME/.local/share/com.jay.restack/thumbnails/**`), versus `utils/thumbnail.rs:6-14` (`app_data_dir()`)
-  - **Problem:** If `$XDG_DATA_HOME` is set, `app_data_dir()` resolves elsewhere and every thumbnail breaks. The identifier is also duplicated in two places (CLAUDE.md rule 8).
-  - **Solution:** Use `"$APPDATA/thumbnails/**"` (a Tauri path variable).
-
 - [ ] **SEC-7 · Low · Confirmed** — Unused plugin permissions are granted.
   - **Location:** `src-tauri/capabilities/default.json:6-10` (`opener:default`, `dialog:default`), `src-tauri/src/lib.rs:34-35`
   - **Problem:** Neither plugin is used by any frontend code. They widen the IPC surface for nothing.
@@ -393,6 +388,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **SEC-6**: Asset-protocol scope is `$APPDATA/thumbnails/**`, which Tauri resolves through `app_data_dir()` like `utils/thumbnail.rs`, so thumbnails work under a custom `$XDG_DATA_HOME` and the identifier is no longer duplicated.
 - [x] 2026-11-05 **BUG-41**: the end of every scan re-keys shows renamed by parser fixes **in place** (`rekey_renamed_shows`, in a savepoint so its errors never fail the scan): same id and route, the old key becomes an alias, a user rename is kept. A group that already owns the new name is absorbed only if it holds just that show's own newer episodes. Two distinct existing shows are never merged automatically (maintainer decision); see BUG-39 for what's left.
 - [x] 2026-11-05 **BUG-5**: `delete_empty_groups` drops groups no media row references (plus their aliases) after every scan and inside merge, move, and reclassify (now transactional). Groups of trashed or missing rows are kept for Undo/remount.
 - [x] 2026-11-05 **BUG-4**: group counts in `get_all_groups` and merge suggestions include only live series rows, and merge suggestions skip groups with no live episodes.

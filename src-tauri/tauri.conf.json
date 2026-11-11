@@ -22,7 +22,7 @@
     "assetProtocol": {
       "enable": true,
       "scope": [
-        "$HOME/.local/share/com.jay.restack/thumbnails/**"
+        "$APPDATA/thumbnails/**"
       ]
     }
   }
