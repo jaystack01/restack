@@ -50,11 +50,6 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧩 Code Design and Quality
 
-- [ ] **DES-1 · Low · Improvement** — Bulk mutations issue one UPDATE per row.
-  - **Location:** `src-tauri/src/db.rs` (`move_episodes`, `reclassify_media`, `set_watched`: `for &media_id in media_ids { tx.execute(…) }`)
-  - **Problem:** Re-checked 2026-11-11: merge, move, reclassify, and set_watched already run as single transactions (scan upserts are batched since PERF-7), so a failure no longer leaves partial state. What remains is per-row `UPDATE` loops inside those transactions.
-  - **Solution:** Use one `UPDATE … WHERE id IN (…)` per statement where the per-row logic allows it (`move_episodes`, `set_watched`). `reclassify_media` numbers episodes per row and may stay a loop.
-
 - [ ] **DES-3 · Low · Confirmed** — Error-message style is inconsistent with the project convention.
   - **Location:** `commands/player.rs:131`, `utils/scanner.rs:23,30`, `utils/thumbnail.rs:10,12` (`format!("…{}", e)`)
   - **Problem:** CLAUDE.md requires `format!("Failed to …: {e}")`. Bare `e.to_string()` gives the user/log no context.
@@ -360,6 +355,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **DES-1**: `move_episodes` and `set_watched` use one `UPDATE … WHERE id IN (…)` per 500 ids (`update_by_ids`); `reclassify_media` stays a loop.
 - [x] 2026-11-11 **DES-2**: library/group/suggestion queries, reclassify and Continue Watching propagate errors (OptionalExtension for 'no row'); a read error no longer deletes the Continue Watching pointer; reclassify skips unknown ids. `get_episode_meta`/`get_next_episode` keep `Option` but log errors (follow-up DES-9).
 - [x] 2026-11-11 **BUG-19**: thumbnail seek = min(15 s, 10% of duration), 1 s if unknown (`thumbnail_seek`); scans retry known files: ffprobe when duration = 0, ffmpeg when `thumbnail_path` is NULL or its file is gone (`ProbeNeed`, `db::get_known_media`). Complete files are never re-probed; failed retries keep existing values (CASE/COALESCE).
 - [x] 2026-11-11 **BUG-47**: read-then-write transactions (scan `UpsertBatch`, migrate/merge/move/reclassify/set_watched/sync_missing_media) begin IMMEDIATE via `db::begin_write`, so under WAL they wait for the write lock instead of failing with SQLITE_BUSY(_SNAPSHOT). Tested with two connections on a temp WAL DB.

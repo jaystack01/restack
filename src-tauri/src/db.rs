@@ -2,7 +2,7 @@ use crate::models::{
     ContinueWatchingItem, Episode, GroupInfo, LibraryResponse, MergeSuggestion, MovieItem,
     OtherItem, ParsedEpisode, SeasonGroup, ShowGroup,
 };
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension, ToSql, Transaction, TransactionBehavior};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -677,6 +677,30 @@ pub fn merge_groups(conn: &Connection, source_id: i64, target_id: i64) -> Result
         .map_err(|e| format!("Failed to commit merge: {e}"))
 }
 
+/// Ids bound per `WHERE id IN (…)` statement, far below SQLite's bound-variable limit.
+/// Tests use a tiny chunk so multi-id updates cross statement boundaries.
+const IDS_PER_STATEMENT: usize = if cfg!(test) { 3 } else { 500 };
+
+/// Run `{update} WHERE id IN (…)` for `ids`, one statement per `IDS_PER_STATEMENT` ids.
+/// `update` uses plain `?` placeholders, bound to `head` before the ids. Returns the
+/// number of rows changed. Call it inside a transaction so the chunks apply together.
+fn update_by_ids(
+    conn: &Connection,
+    update: &str,
+    head: &[&dyn ToSql],
+    ids: &[i64],
+) -> rusqlite::Result<usize> {
+    let mut changed = 0;
+    for chunk in ids.chunks(IDS_PER_STATEMENT) {
+        let placeholders = vec!["?"; chunk.len()].join(", ");
+        let sql = format!("{update} WHERE id IN ({placeholders})");
+        let mut values: Vec<&dyn ToSql> = head.to_vec();
+        values.extend(chunk.iter().map(|id| id as &dyn ToSql));
+        changed += conn.execute(&sql, values.as_slice())?;
+    }
+    Ok(changed)
+}
+
 /// Move specific episodes (by media.id) to a target group and mark them user_pinned.
 pub fn move_episodes(
     conn: &Connection,
@@ -684,13 +708,13 @@ pub fn move_episodes(
     target_group_id: i64,
 ) -> Result<(), String> {
     let tx = begin_write(conn).map_err(|e| format!("Failed to start move: {e}"))?;
-    for &media_id in media_ids {
-        tx.execute(
-            "UPDATE media SET group_id = ?1, user_pinned = 1 WHERE id = ?2",
-            params![target_group_id, media_id],
-        )
-        .map_err(|e| format!("Failed to move episode id {media_id}: {e}"))?;
-    }
+    update_by_ids(
+        &tx,
+        "UPDATE media SET group_id = ?, user_pinned = 1",
+        &[&target_group_id],
+        media_ids,
+    )
+    .map_err(|e| format!("Failed to move episodes: {e}"))?;
     delete_empty_groups(&tx)?;
     tx.commit()
         .map_err(|e| format!("Failed to commit move: {e}"))
@@ -914,13 +938,13 @@ pub fn get_playback_state(
 /// from the beginning, and doesn't move the Continue Watching pointer.
 pub fn set_watched(conn: &Connection, media_ids: &[i64], watched: bool) -> Result<(), String> {
     let tx = begin_write(conn).map_err(|e| format!("Failed to start watched update: {e}"))?;
-    for &media_id in media_ids {
-        tx.execute(
-            "UPDATE media SET watched = ?1, last_position = 0 WHERE id = ?2",
-            params![watched, media_id],
-        )
-        .map_err(|e| format!("Failed to update watched state for media id {media_id}: {e}"))?;
-    }
+    update_by_ids(
+        &tx,
+        "UPDATE media SET watched = ?, last_position = 0",
+        &[&watched],
+        media_ids,
+    )
+    .map_err(|e| format!("Failed to update watched state: {e}"))?;
     tx.commit()
         .map_err(|e| format!("Failed to commit watched update: {e}"))
 }
@@ -2714,6 +2738,48 @@ mod tests {
             )
             .unwrap();
         assert!(pointer, "a read error must not clear Continue Watching");
+    }
+
+    #[test]
+    fn bulk_move_and_watched_cover_every_id_across_statements() {
+        let conn = test_db();
+        let paths: Vec<String> = (1..=IDS_PER_STATEMENT * 2 + 1)
+            .map(|n| format!("/v/a.s01e{n:02}.mkv"))
+            .collect();
+        for (n, p) in paths.iter().enumerate() {
+            upsert_episode(&conn, p, &ep("A", 1, n as u32 + 1), 100, None).unwrap();
+            update_progress(&conn, p, 40, false).unwrap();
+        }
+        upsert_episode(&conn, "/v/a.s02e01.mkv", &ep("A", 2, 1), 100, None).unwrap();
+        update_progress(&conn, "/v/a.s02e01.mkv", 40, false).unwrap();
+        let source = row::<i64>(&conn, "/v/a.s02e01.mkv", "group_id");
+        let target = find_or_create_group(&conn, "B").unwrap();
+        let ids: Vec<i64> = paths.iter().map(|p| id_of(&conn, p)).collect();
+
+        move_episodes(&conn, &ids, target).unwrap();
+        set_watched(&conn, &ids, true).unwrap();
+
+        for p in &paths {
+            assert_eq!(row::<i64>(&conn, p, "group_id"), target, "{p}");
+            assert_eq!(row::<i64>(&conn, p, "user_pinned"), 1, "{p}");
+            assert_eq!(row::<i64>(&conn, p, "watched"), 1, "{p}");
+            assert_eq!(row::<i64>(&conn, p, "last_position"), 0, "{p}");
+        }
+        // Rows outside the list are untouched, and their group survives
+        assert_eq!(row::<i64>(&conn, "/v/a.s02e01.mkv", "group_id"), source);
+        assert_eq!(row::<i64>(&conn, "/v/a.s02e01.mkv", "user_pinned"), 0);
+        assert_eq!(row::<i64>(&conn, "/v/a.s02e01.mkv", "watched"), 0);
+        assert_eq!(row::<i64>(&conn, "/v/a.s02e01.mkv", "last_position"), 40);
+
+        // Moving the last row empties the source group, which is collected
+        move_episodes(&conn, &[id_of(&conn, "/v/a.s02e01.mkv")], target).unwrap();
+        let groups: i64 = conn
+            .query_row("SELECT COUNT(*) FROM show_groups", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(groups, 1);
+        // An empty id list is a no-op
+        move_episodes(&conn, &[], target).unwrap();
+        set_watched(&conn, &[], false).unwrap();
     }
 
     #[test]
