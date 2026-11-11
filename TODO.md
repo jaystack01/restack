@@ -22,7 +22,7 @@ _Nothing picked yet. Move items here when you start them._
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
 3. ~~**Make it responsive**: PERF-1, PERF-6, PERF-7, PERF-8~~ (done 2026-11-04).
 4. **Safety net before refactors**: ~~CHORE-1~~ (done 2026-11-04), ~~TEST-1, TEST-2~~ (done 2026-11-01), ~~CHORE-2, CHORE-3~~ (done 2026-11-05).
-5. **Then the structure**: ARCH-*, DES-*, MAINT-*.
+5. **Then the structure** (in progress): ARCH-*, DES-*, MAINT-*. The 2026-11-11 wave closed SEC-4, SEC-5, SEC-6, SEC-7, DEP-2, BUG-20, BUG-23, BUG-28, BUG-30, and PERF-15. Next: MAINT-1 (wire the merge/rename/suggestion UI in, per the maintainer), BUG-37 and BUG-47 (the session and transaction follow-ups of this wave).
 
 ---
 
@@ -50,10 +50,10 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧩 Code Design and Quality
 
-- [ ] **DES-1 · Medium · Confirmed** — Multi-statement mutations aren't wrapped in transactions.
-  - **Location:** `src-tauri/src/db.rs` (`merge_groups`, `move_episodes`, `reclassify_media`), `commands/scanner.rs` upsert loop (scan upserts are batched into transactions since PERF-7)
-  - **Problem:** A failure halfway leaves partial state (some episodes moved, group not deleted, and so on). Loops issue one autocommit statement per row, which costs one fsync each.
-  - **Solution:** Take `&mut Connection`, use `let tx = conn.transaction()?; …; tx.commit()?`. Use `UPDATE … WHERE id IN (…)` for the id loops.
+- [ ] **DES-1 · Low · Improvement** — Bulk mutations issue one UPDATE per row.
+  - **Location:** `src-tauri/src/db.rs` (`move_episodes`, `reclassify_media`, `set_watched`: `for &media_id in media_ids { tx.execute(…) }`)
+  - **Problem:** Re-checked 2026-11-11: merge, move, reclassify, and set_watched already run as single transactions (scan upserts are batched since PERF-7), so a failure no longer leaves partial state. What remains is per-row `UPDATE` loops inside those transactions.
+  - **Solution:** Use one `UPDATE … WHERE id IN (…)` per statement where the per-row logic allows it (`move_episodes`, `set_watched`). `reclassify_media` numbers episodes per row and may stay a loop.
 
 - [ ] **DES-2 · Low · Confirmed** — Errors are silently swallowed or dropped in the DB layer.
   - **Location:** `src-tauri/src/db.rs:430,459` (`filter_map(|r| r.ok())` drops movie/other rows), `:540,548` (`unwrap_or((1,0))`, `unwrap_or(0)`), `get_episode_meta` / `get_next_episode` (`.ok()?` everywhere). (`get_last_position` was replaced by `get_playback_state`, which uses `.optional()`.)
@@ -279,7 +279,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`), none ignored. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
+_Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`), none ignored. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
 
 
 
@@ -297,6 +297,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
   - **Location:** `src/components/library/{MergeSuggestionBanner,MergeGroupModal,RenameGroupModal,GroupTabs,GroupActionsMenu,ShowCard}.jsx`, `src/components/ui/Tab.jsx` (imported nowhere, or only by other dead files)
   - **Problem:** Merge, merge suggestions, and the group picker exist in the backend (`merge_groups_cmd`, `get_merge_suggestions_cmd`, `get_all_groups_cmd`) but have **no entry point** in the UI. AGENT.md §3 lists "merge suggestions" as part of `SeriesDetail.jsx`.
   - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (BUG-13 and BUG-32 are fixed), or delete the files and the unused commands. Update AGENT.md either way.
+  - **Decision (maintainer, 2026-11-11):** wire the existing merge, rename, and merge-suggestion UI in (planned for the next wave) rather than deleting it.
 
 - [ ] **MAINT-2 · Low · Confirmed** — Small dead code paths.
   - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `commands/scanner.rs:199-202` (`get_scan_roots` unused, keep for FEAT-1)

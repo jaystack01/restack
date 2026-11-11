@@ -379,4 +379,4 @@ Still backlog: subtitle management, optional TMDB metadata, multi-user profiles,
 - Never renumber or reuse IDs. Commits may reference them ("fixes BUG-2").
 - If an item changes a documented invariant, sharp edge, command, or schema, update the relevant section of this file in the same change.
 
-*Last updated: 2026-11-04*
+*Last updated: 2026-11-11*
