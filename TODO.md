@@ -159,15 +159,15 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Since BUG-20, hidden and build dirs are skipped and rows under them are left untouched so nothing indexed there is lost. But rows that older builds indexed inside hidden dirs then stay visible forever, even after their files are deleted, and fail to play.
   - **Solution:** Purge them together with BUG-35, hide rows whose files no longer exist, or add a hidden-dir allowlist (FEAT-1).
 
-- [ ] **BUG-45 · Low · Potential** — Hidden entries in `/mnt` become scan roots.
-  - **Location:** `src-tauri/src/utils/scanner.rs` (`discover_default_scan_roots`)
-  - **Problem:** Every dir directly in `/mnt` becomes a root, including hidden ones like `/mnt/.snapshots`, and roots are walked fully (skip rules only apply below a root).
-  - **Solution:** Skip hidden entries when listing `/mnt`.
-
 - [ ] **BUG-48 · Low · Improvement** — Sub-second clips are re-probed on every scan.
   - **Location:** `src-tauri/src/utils/scanner.rs` (ffprobe duration parsing), `src-tauri/src/commands/scanner.rs` (`ProbeNeed::for_known`), `src-tauri/src/utils/thumbnail.rs` (`thumbnail_seek`)
   - **Problem:** ffprobe's duration is truncated to whole seconds, so a clip shorter than 1 s is stored as duration 0. The thumbnail then seeks to 1 s (the unknown-duration fallback), gets no frame, and since BUG-19 both probes are retried on every scan.
   - **Solution:** Parse the fractional duration (store at least 1, or keep sub-second precision for the seek), or record the probe failure so it isn't retried every scan (see DEP-8).
+
+- [ ] **BUG-49 · Low · Potential** — Rows indexed from a now-skipped hidden `/mnt` root are never reconciled.
+  - **Location:** `src-tauri/src/utils/scanner.rs` (`mount_point_dirs`, `reconcile_unseen`)
+  - **Problem:** Since BUG-45, hidden entries in `/mnt` (e.g. `/mnt/.snapshots`) are no longer scan roots. Rows that older builds indexed from such a root now sit outside every walked root, so reconciliation never hides or purges them, and snapshot duplicates of real episodes stay in the library.
+  - **Solution:** Purge them together with BUG-35 / BUG-44 (e.g. drop rows under a hidden `/mnt/.*` root, or hide rows whose files no longer exist).
 
 ## 🔐 Security and Data Integrity
 
@@ -344,6 +344,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-45**: default roots from `/mnt` skip hidden entries (`mount_point_dirs`, temp-dir tested). Follow-up: BUG-49.
 - [x] 2026-11-11 **BUG-31**: the tracker retries the IPC connect every 200 ms until it succeeds or its own session's mpv is gone (exited or replaced), capped at 30 s (`socket_wait_step`/`wait_for_socket`); `try_clone` failure is logged instead of panicking; every exit path removes the socket and emits `video_playback_stopped {file_path, session}` (`end_session`) before `reap_session`.
 - [x] 2026-11-11 **BUG-46**: every `player_process` access goes through `lock_player` (recovers a poisoned mutex via `into_inner`), so the swaps and the tracker's reap always happen and no mpv is orphaned.
 - [x] 2026-11-11 **DES-1**: `move_episodes` and `set_watched` use one `UPDATE … WHERE id IN (…)` per 500 ids (`update_by_ids`); `reclassify_media` stays a loop.
@@ -356,7 +357,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 - [x] 2026-11-11 **BUG-28**: `video_playback_started`/`video_playback_stopped` carry `{ file_path, session }`, and the store clears Playing only when the stop's session matches the current one (`clearPlayingSession`), so a replaced mpv's late stop no longer clears a replay of the same file.
 - [x] 2026-11-11 **BUG-30**: each playback gets a session id (`next_playback_session`), `AppState.player_process` stores `PlayerSession { session, child }`, and the tracker's `reap_session` `try_wait`s only its own session's mpv after the post-loop events and clears the slot once it exited, so no zombie lingers and a newer mpv is never touched. Follow-up: BUG-46.
 - [x] 2026-11-11 **SEC-5**: the mpv IPC socket is created in `$XDG_RUNTIME_DIR` (per-user, mode 0700) when it is an absolute existing dir, falling back to `/tmp` (`mpv_socket_dir`, tested).
-- [x] 2026-11-11 **BUG-20**: Walk skips hidden dirs below a root (a hidden root is still walked); `/run/media/<user>` added to default roots; user name from `$USER`/`$LOGNAME` before the `$HOME` basename. Skipped non-trash subtrees (`ScanWalk.skipped_dirs`) are excluded from reconciliation, so rows indexed there earlier are left untouched. Follow-ups: BUG-44, BUG-45.
+- [x] 2026-11-11 **BUG-20**: Walk skips hidden dirs below a root (a hidden root is still walked); `/run/media/<user>` added to default roots; user name from `$USER`/`$LOGNAME` before the `$HOME` basename. Skipped non-trash subtrees (`ScanWalk.skipped_dirs`) are excluded from reconciliation, so rows indexed there earlier are left untouched. Follow-ups: BUG-44, BUG-45 (done).
 - [x] 2026-11-11 **SEC-7, DEP-2**: removed the unused dialog and opener plugins: their Rust crates and `.plugin(...)` calls in `lib.rs`, the `@tauri-apps/plugin-dialog`/`plugin-opener` npm packages, and the `opener:default`/`dialog:default` capability permissions; both lockfiles updated. FEAT-1 re-adds the dialog with a narrow permission.
 - [x] 2026-11-11 **SEC-6**: Asset-protocol scope is `$APPDATA/thumbnails/**`, which Tauri resolves through `app_data_dir()` like `utils/thumbnail.rs`, so thumbnails work under a custom `$XDG_DATA_HOME` and the identifier is no longer duplicated.
 - [x] 2026-11-05 **BUG-41**: the end of every scan re-keys shows renamed by parser fixes **in place** (`rekey_renamed_shows`, in a savepoint so its errors never fail the scan): same id and route, the old key becomes an alias, a user rename is kept. A group that already owns the new name is absorbed only if it holds just that show's own newer episodes. Two distinct existing shows are never merged automatically (maintainer decision); see BUG-39 for what's left.

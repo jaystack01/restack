@@ -192,20 +192,28 @@ pub fn discover_default_scan_roots() -> Vec<String> {
         }
     }
 
-    let mnt = Path::new("/mnt");
-
-    if mnt.exists() && mnt.is_dir() {
-        if let Ok(entries) = fs::read_dir(mnt) {
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if path.is_dir() {
-                    roots.insert(path.to_string_lossy().to_string());
-                }
-            }
-        }
+    for dir in mount_point_dirs(Path::new("/mnt")) {
+        roots.insert(dir.to_string_lossy().to_string());
     }
 
     roots.into_iter().collect()
+}
+
+/// Each directory directly in `base` (e.g. `/mnt`), as a scan root. Hidden
+/// entries such as `/mnt/.snapshots` are left out: roots are walked in full,
+/// since the hidden-dir skip only applies below a root (BUG-45).
+fn mount_point_dirs(base: &Path) -> Vec<PathBuf> {
+    let Ok(entries) = fs::read_dir(base) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .flatten()
+        .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    dirs.sort();
+    dirs
 }
 
 /// Result of walking the scan roots.
@@ -537,6 +545,25 @@ pub(crate) mod tests {
         assert_eq!(current_username(s("a/b"), None, s("/home/jay/")), s("jay"));
         assert_eq!(current_username(None, None, s("/")), None);
         assert_eq!(current_username(None, None, None), None);
+    }
+
+    #[test]
+    fn mount_point_dirs_skip_hidden_entries_and_files() {
+        let base = TempDir::new("mount-points");
+        for dir in ["usb", "nas", ".snapshots", ".Trash-1000"] {
+            fs::create_dir_all(base.0.join(dir)).unwrap();
+        }
+        base.file("readme.txt");
+        assert_eq!(
+            mount_point_dirs(&base.0),
+            [base.0.join("nas"), base.0.join("usb")]
+        );
+    }
+
+    #[test]
+    fn mount_point_dirs_of_a_missing_base_is_empty() {
+        let base = TempDir::new("mount-points-missing");
+        assert!(mount_point_dirs(&base.0.join("absent")).is_empty());
     }
 
     #[test]
