@@ -22,7 +22,8 @@ _Nothing picked yet. Move items here when you start them._
 2. ~~**Fix silent state corruption**: SEC-3, BUG-9, BUG-10, BUG-11, BUG-12~~ (done 2026-11-01, plus BUG-2).
 3. ~~**Make it responsive**: PERF-1, PERF-6, PERF-7, PERF-8~~ (done 2026-11-04).
 4. **Safety net before refactors**: ~~CHORE-1~~ (done 2026-11-04), ~~TEST-1, TEST-2~~ (done 2026-11-01), ~~CHORE-2, CHORE-3~~ (done 2026-11-05).
-5. **Then the structure** (in progress): ARCH-*, DES-*, MAINT-*. The 2026-11-11 wave closed SEC-4, SEC-5, SEC-6, SEC-7, DEP-2, BUG-20, BUG-23, BUG-28, BUG-30, and PERF-15. Next: MAINT-1 (wire the merge/rename/suggestion UI in, per the maintainer), BUG-37 and BUG-47 (the session and transaction follow-ups of this wave).
+5. **Then the structure** (in progress): ARCH-*, DES-*, MAINT-*. The first 2026-11-11 wave closed SEC-4, SEC-5, SEC-6, SEC-7, DEP-2, BUG-20, BUG-23, BUG-28, BUG-30, and PERF-15. The second closed BUG-19, BUG-31, BUG-45, BUG-46, BUG-47, DES-1, DES-2, MAINT-1, MAINT-4, FEAT-3, and FEAT-4.
+6. **Next**: BUG-37 (stale Continue Watching from an old tracker), MAINT-3 (toasts in SeriesDetail and the modals), DEP-8 + BUG-48 (bound probe retries), MAINT-5/6/7 (merge UI follow-ups), DES-9.
 
 ---
 
@@ -258,7 +259,7 @@ _Nothing picked yet. Move items here when you start them._
 
 ## 🧪 Testing and Reliability
 
-_Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `models.rs`), none ignored. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
+_Current state (2026-11-11): `cargo test` runs 155 backend tests (`db.rs`, `utils/scanner.rs`, `utils/parser.rs`, `utils/thumbnail.rs`, `commands/scanner.rs`, `commands/player.rs`, `commands/library.rs`, `commands/system.rs`, `models.rs`), none ignored. No frontend tests. CI (`.github/workflows/ci.yml`) runs on every push to `develop`/`main` and on PRs. `npm run lint` (ESLint) and `cargo clippy --all-targets -- -D warnings` are clean with no warnings._
 
 
 

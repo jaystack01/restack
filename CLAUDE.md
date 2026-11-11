@@ -22,6 +22,6 @@ Guidance for Claude Code in this repo. The full project context (architecture, s
 5. **Styling**: use the `@theme` tokens from `src/index.css` and `cn()`. No `tailwind.config.js`.
 6. **Match the surrounding style**: `Result<_, String>` with `format!("Failed to …: {e}")` in Rust, and function components + hooks in JSX. Keep comment density similar.
 7. **Don't touch the user's real library** while testing: `scan_user_storage` scans all of `$HOME`, and `delete_episodes_cmd` really moves files to Trash. Never run the app's delete flows against real files.
-8. Don't change the Tauri `identifier` (`com.jay.restack`) without also updating `assetProtocol.scope` in `tauri.conf.json`. Thumbnails depend on it.
+8. Don't change the Tauri `identifier` (`com.jay.restack`). It names the data dir (`~/.local/share/com.jay.restack/`), so changing it orphans the user's DB and thumbnails. The asset-protocol scope (`$APPDATA/thumbnails/**`) follows it automatically.
 9. When you change commands, events, schema, or conventions, **update AGENT.md** in the same change.
 10. Don't commit unless asked. When you do, follow the AGENT.md git workflow: commit directly on `develop` (no per-task branches), one commit per task, with Conventional Commits messages and scopes from AGENT.md "Commit messages" (TODO IDs in a `Refs:` footer), never on `main`. Pushing `develop` after a finished wave is approved; never push or merge into `main` without being asked. Backlog work runs in multi-agent waves (AGENT.md "Multi-agent waves").
