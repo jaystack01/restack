@@ -170,11 +170,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Every dir directly in `/mnt` becomes a root, including hidden ones like `/mnt/.snapshots`, and roots are walked fully (skip rules only apply below a root).
   - **Solution:** Skip hidden entries when listing `/mnt`.
 
-- [ ] **BUG-46 · Low · Potential** — A poisoned `player_process` lock orphans mpv.
-  - **Location:** `src-tauri/src/commands/player.rs` `start_playback` (`state.player_process.lock().ok()` on the swap)
-  - **Problem:** If the mutex is ever poisoned (a panic while it is held), `.lock().ok()` yields `None`: the old mpv is not killed, and the new `Child` is dropped without being stored, so it keeps running untracked and is never reaped.
-  - **Solution:** Use `lock().unwrap_or_else(|e| e.into_inner())` so the swap still happens on a poisoned lock.
-
 - [ ] **BUG-48 · Low · Improvement** — Sub-second clips are re-probed on every scan.
   - **Location:** `src-tauri/src/utils/scanner.rs` (ffprobe duration parsing), `src-tauri/src/commands/scanner.rs` (`ProbeNeed::for_known`), `src-tauri/src/utils/thumbnail.rs` (`thumbnail_seek`)
   - **Problem:** ffprobe's duration is truncated to whole seconds, so a clip shorter than 1 s is stored as duration 0. The thumbnail then seeks to 1 s (the unknown-duration fallback), gets no frame, and since BUG-19 both probes are retried on every scan.
@@ -355,6 +350,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-46**: every `player_process` access goes through `lock_player` (recovers a poisoned mutex via `into_inner`), so the swaps and the tracker's reap always happen and no mpv is orphaned.
 - [x] 2026-11-11 **DES-1**: `move_episodes` and `set_watched` use one `UPDATE … WHERE id IN (…)` per 500 ids (`update_by_ids`); `reclassify_media` stays a loop.
 - [x] 2026-11-11 **DES-2**: library/group/suggestion queries, reclassify and Continue Watching propagate errors (OptionalExtension for 'no row'); a read error no longer deletes the Continue Watching pointer; reclassify skips unknown ids. `get_episode_meta`/`get_next_episode` keep `Option` but log errors (follow-up DES-9).
 - [x] 2026-11-11 **BUG-19**: thumbnail seek = min(15 s, 10% of duration), 1 s if unknown (`thumbnail_seek`); scans retry known files: ffprobe when duration = 0, ffmpeg when `thumbnail_path` is NULL or its file is gone (`ProbeNeed`, `db::get_known_media`). Complete files are never re-probed; failed retries keep existing values (CASE/COALESCE).

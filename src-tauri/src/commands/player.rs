@@ -9,6 +9,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::{AppHandle, Emitter, Manager};
@@ -162,6 +163,24 @@ fn stop_player(old_process: Option<PlayerSession>) {
     }
 }
 
+/// Lock the `player_process` slot, recovering it if the mutex is poisoned: the
+/// slot only holds an `Option<PlayerSession>`, which a panic can't leave half
+/// written, and skipping the swap would orphan an mpv.
+fn lock_player(
+    slot: &Mutex<Option<PlayerSession>>,
+) -> std::sync::MutexGuard<'_, Option<PlayerSession>> {
+    slot.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Store `player` as the running mpv and return the one it replaced, if any.
+/// Holds the lock only for the swap.
+fn swap_player(
+    slot: &Mutex<Option<PlayerSession>>,
+    player: Option<PlayerSession>,
+) -> Option<PlayerSession> {
+    std::mem::replace(&mut *lock_player(slot), player)
+}
+
 /// How long a finished tracker keeps checking for its mpv to exit before
 /// leaving it to the next `play_episode` (mpv exits just after `end-file`).
 const REAP_ATTEMPTS: u32 = 20;
@@ -196,10 +215,7 @@ fn reap_if_exited(slot: &mut Option<PlayerSession>, session: u64) -> bool {
 fn reap_session(app: &AppHandle, session: u64) {
     let state = app.state::<AppState>();
     for _ in 0..REAP_ATTEMPTS {
-        let done = match state.player_process.lock() {
-            Ok(mut slot) => reap_if_exited(&mut slot, session),
-            Err(_) => true,
-        };
+        let done = reap_if_exited(&mut lock_player(&state.player_process), session);
         if done {
             return;
         }
@@ -230,11 +246,7 @@ fn start_playback(
     cmd.args(mpv_args(&file_path, &socket_path, start));
 
     // Only swap the Child under the lock; kill/wait and spawn happen outside it
-    let old_process = state
-        .player_process
-        .lock()
-        .ok()
-        .and_then(|mut lock| lock.take());
+    let old_process = swap_player(&state.player_process, None);
     stop_player(old_process);
 
     let child = cmd
@@ -243,11 +255,10 @@ fn start_playback(
     let session = next_playback_session();
 
     // A concurrent play_episode may have stored its mpv meanwhile: the newest wins
-    let raced = state
-        .player_process
-        .lock()
-        .ok()
-        .and_then(|mut lock| lock.replace(PlayerSession { session, child }));
+    let raced = swap_player(
+        &state.player_process,
+        Some(PlayerSession { session, child }),
+    );
     stop_player(raced);
 
     // Notify frontend
@@ -683,6 +694,44 @@ mod tests {
             newer.child.try_wait().unwrap().is_some(),
             "and was not reaped by the old tracker"
         );
+    }
+
+    /// A slot whose mutex was poisoned by a panic while it was held.
+    fn poisoned_slot(player: Option<PlayerSession>) -> Mutex<Option<PlayerSession>> {
+        let slot = Mutex::new(player);
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = slot.lock().unwrap();
+            panic!("poison the player slot");
+        }));
+        assert!(slot.is_poisoned());
+        slot
+    }
+
+    #[test]
+    fn swap_on_a_poisoned_lock_still_hands_back_the_old_player() {
+        let slot = poisoned_slot(Some(fake_player(1, "sleep", &["30"])));
+        let old = swap_player(&slot, None).expect("old mpv is returned to be killed");
+        assert_eq!(old.session, 1);
+        stop_player(Some(old));
+        assert!(lock_player(&slot).is_none());
+    }
+
+    #[test]
+    fn swap_on_a_poisoned_lock_still_stores_the_new_player() {
+        let slot = poisoned_slot(None);
+        assert!(swap_player(&slot, Some(fake_player(2, "sleep", &["30"]))).is_none());
+        let stored = swap_player(&slot, None).expect("new mpv is tracked, not orphaned");
+        assert_eq!(stored.session, 2);
+        stop_player(Some(stored));
+    }
+
+    #[test]
+    fn reap_on_a_poisoned_lock_still_clears_an_exited_player() {
+        let player = fake_player(3, "true", &[]);
+        wait_until_exited(&player);
+        let slot = poisoned_slot(Some(player));
+        assert!(reap_if_exited(&mut lock_player(&slot), 3));
+        assert!(lock_player(&slot).is_none());
     }
 
     #[test]
