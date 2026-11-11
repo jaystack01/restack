@@ -13,6 +13,7 @@ use crate::commands::library::{
 };
 use crate::commands::player::{play_episode, set_watched_cmd};
 use crate::commands::scanner::{get_scan_roots, scan_and_sync, scan_user_storage};
+use crate::commands::system::check_dependencies;
 use crate::db::{init_schema, migrate_existing_groups, open_db};
 use crate::models::AppState;
 use std::sync::atomic::AtomicBool;
@@ -61,6 +62,7 @@ pub fn run() {
             delete_episodes_cmd,
             restore_episodes_cmd,
             reclassify_media_cmd,
+            check_dependencies,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

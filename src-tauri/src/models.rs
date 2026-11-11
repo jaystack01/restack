@@ -150,6 +150,15 @@ pub struct LibraryResponse {
     pub movies: Vec<MovieItem>,
     pub others: Vec<OtherItem>,
 }
+
+/// Which runtime tools `check_dependencies` found on `PATH`.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DependencyStatus {
+    pub mpv: bool,
+    pub ffmpeg: bool,
+    pub ffprobe: bool,
+}
 #[cfg(test)]
 mod tests {
     use super::*;

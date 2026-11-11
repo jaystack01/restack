@@ -6,7 +6,12 @@ import SeriesDetail from "./pages/SeriesDetail";
 import MoviesPage from "./pages/MoviesPage";
 import OthersPage from "./pages/OthersPage";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { getLibraryGrouped, playMedia, scanUserStorage } from "./api";
+import {
+  checkDependencies,
+  getLibraryGrouped,
+  playMedia,
+  scanUserStorage,
+} from "./api";
 import { listen } from "@tauri-apps/api/event";
 import {
   setLibrary,
@@ -25,6 +30,25 @@ const SCAN_TOAST_ID = "scan-error";
 
 // The guard's rejection when another scan (or a Trash batch) holds it.
 const SCAN_BUSY = "A scan is already running";
+
+const DEPS_TOAST_ID = "missing-dependencies";
+
+// What stops working without each runtime tool (see check_dependencies).
+const DEPENDENCY_ROLES = [
+  ["mpv", "playback"],
+  ["ffprobe", "video durations"],
+  ["ffmpeg", "thumbnails"],
+];
+
+/** Warning text naming the missing tools, or null if all are present. */
+function missingDependenciesMessage(status) {
+  const missing = DEPENDENCY_ROLES.filter(([tool]) => !status[tool]);
+  if (!missing.length) return null;
+  const list = missing.map(([tool, role]) => `${tool} (${role})`).join(", ");
+  return `Not found on PATH: ${list}. Install ${
+    missing.length === 1 ? "it" : "them"
+  } and restart Restack.`;
+}
 
 const IDLE_SCAN_STATE = {
   phase: "idle",
@@ -111,6 +135,24 @@ function App() {
     window.addEventListener("keydown", handleKeyDown);
 
     const init = async () => {
+      // Independent of the scan: warn once about missing tools
+      checkDependencies()
+        .then((status) => {
+          const message = missingDependenciesMessage(status);
+          if (message && !cancelled) {
+            showToast(message, {
+              variant: "error",
+              duration: null,
+              id: DEPS_TOAST_ID,
+            });
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            showError(err, { context: "Couldn't check for mpv and ffmpeg" });
+          }
+        });
+
       // Register scan listeners first (parallel), then start the scan
       const [unlistenStart, unlistenProgress] = await Promise.all([
         listen("scan:start", (event) => {

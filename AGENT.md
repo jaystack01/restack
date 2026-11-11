@@ -12,7 +12,7 @@ It is *not* a player, streaming server, or media center. Keep it offline-first, 
 
 - npm package / Cargo crate: `restack` (lib crate: `restack_lib`)
 - Tauri identifier: `com.jay.restack`. Changing it moves the app data dir, which orphans the user's DB and thumbnails.
-- Runtime deps on the host: `mpv`, `ffmpeg`, `ffprobe` (all must be on `PATH`)
+- Runtime deps on the host: `mpv`, `ffmpeg`, `ffprobe` (all must be on `PATH`; checked at startup by `check_dependencies`, which shows a persistent toast naming any missing tool)
 
 ---
 
@@ -33,7 +33,7 @@ cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dir
 cd src-tauri && cargo clippy --all-targets -- -D warnings   # lint backend (kept at 0 warnings)
 ```
 
-- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations, aliases and merges, end-of-scan re-keying, group GC, live-only counts; plus WAL, busy-timeout and read-only-DB tests on temp-file DBs, IMMEDIATE transactions against a concurrent writer on a temp WAL DB, and chunked bulk updates), `utils/scanner.rs` (walk + reconcile decisions, skip rules, username and default roots, hidden `/mnt` entries, `run_with_timeout`), `utils/thumbnail.rs` (seek position), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe, including per-file upsert failures forced by test-only SQLite triggers a scan batch waiting on a concurrent writer, and probe retries for known files with a zero duration or a missing thumbnail), `commands/player.rs` (recorded mpv IPC lines through `drive_ipc` with a fake clock: throttle, watched latch, pause, eof → play next, read errors; the resume/watched rules; mpv argument order, socket dir, session-scoped reaping with stand-in `true`/`sleep` children, poisoned-lock recovery, socket-wait decisions, and the playback event payload shape), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan, `run_trash_batch` id validation with a fake file op, playback session ids strictly increase). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
+- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations, aliases and merges, end-of-scan re-keying, group GC, live-only counts; plus WAL, busy-timeout and read-only-DB tests on temp-file DBs, IMMEDIATE transactions against a concurrent writer on a temp WAL DB, and chunked bulk updates), `utils/scanner.rs` (walk + reconcile decisions, skip rules, username and default roots, hidden `/mnt` entries, `run_with_timeout`), `utils/thumbnail.rs` (seek position), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe, including per-file upsert failures forced by test-only SQLite triggers a scan batch waiting on a concurrent writer, and probe retries for known files with a zero duration or a missing thumbnail), `commands/player.rs` (recorded mpv IPC lines through `drive_ipc` with a fake clock: throttle, watched latch, pause, eof → play next, read errors; the resume/watched rules; mpv argument order, socket dir, session-scoped reaping with stand-in `true`/`sleep` children, poisoned-lock recovery, socket-wait decisions, and the playback event payload shape), `commands/system.rs` (PATH lookup of executables with temp dirs: non-executables, symlinks, empty entries), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan, `run_trash_batch` id validation with a fake file op, playback session ids strictly increase). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
 - **No frontend tests yet.** CI (`.github/workflows/ci.yml`) runs lint, format check, build, clippy, and tests on every push to `develop`/`main` and on PRs. Verify locally before committing with `npm run build`, `npm run lint`, `npm run format:check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 - **Formatting**: Prettier with default options for `src/` and the root JS/JSON/HTML/CSS (`.prettierignore` skips `src-tauri`, `dist`, and Markdown), and default `cargo fmt` for Rust. Run `npm run format` before committing; don't hand-format against it.
 
@@ -148,6 +148,7 @@ src-tauri/src/
   commands/scanner.rs        scan_user_storage, scan_and_sync, get_scan_roots
   commands/library.rs        get_library_grouped, continue watching, delete/restore, reclassify
   commands/groups.rs         rename/merge/move groups, group list, merge suggestions
+  commands/system.rs         check_dependencies (mpv/ffmpeg/ffprobe PATH lookup, no spawn)
   commands/player.rs         play_episode (mpv + IPC tracker), set_watched_cmd; pure parse_ipc_line +
                              ProgressTracker, drive_ipc loop, track_progress I/O glue
   utils/parser.rs            Filename → Series / Movie / Other
@@ -285,6 +286,7 @@ When adding a pattern, insert it at the right priority and think about false pos
 | `delete_episodes_cmd` | `{ mediaIds }` | — |
 | `restore_episodes_cmd` | `{ mediaIds }` | — |
 | `reclassify_media_cmd` | `{ mediaIds, targetType: 'series'\|'movie'\|'other', targetGroupId }` | — |
+| `check_dependencies` | — | `DependencyStatus { mpv, ffmpeg, ffprobe }` (booleans; PATH lookup only, doesn't touch the DB) |
 
 Tauri maps camelCase JS args to snake_case Rust params. Return structs use `#[serde(rename_all = "camelCase")]`. All commands are `async` and return `Result` (§7.1); `delete_episodes_cmd`/`restore_episodes_cmd` return an error while a scan is running.
 

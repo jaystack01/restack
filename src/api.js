@@ -178,3 +178,14 @@ export function getAllGroups() {
 export function getMergeSuggestions() {
   return invoke("get_merge_suggestions_cmd");
 }
+
+// ── System ────────────────────────────────────────────────────────────────
+
+/**
+ * Whether the runtime tools are on PATH. The backend only looks for the
+ * executables; it doesn't run them.
+ * @returns {Promise<{mpv: boolean, ffmpeg: boolean, ffprobe: boolean}>}
+ */
+export function checkDependencies() {
+  return invoke("check_dependencies");
+}

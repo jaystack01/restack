@@ -248,8 +248,8 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **DEP-8 · Low · Improvement** — Runtime tools aren't validated.
   - **Location:** `utils/scanner.rs:15`, `utils/thumbnail.rs:29`, `commands/player.rs:52`
-  - **Problem:** A missing `ffprobe`/`ffmpeg` yields duration 0 and no thumbnail, retried every scan since BUG-19 (2026-11-11). A missing `mpv` errors, but the UI swallows it. Files whose probe always fails (or tools that are missing) are retried on every scan, and each retry forces a batch commit and can cost up to the 30 s / 60 s timeouts.
-  - **Solution:** See FEAT-4. Add a per-row failure count (additive column) or a per-scan retry cap, and skip probing when FEAT-4's `dependency_status` says the tool is missing, so rows are retried once it is installed.
+  - **Problem:** A missing `ffprobe`/`ffmpeg` yields duration 0 and no thumbnail, retried every scan since BUG-19 (2026-11-11). Since FEAT-4 (2026-11-11) a missing tool is reported once at startup, and a failed `mpv` play shows a toast (FEAT-3), but scans still probe regardless. Files whose probe always fails (or tools that are missing) are retried on every scan, and each retry forces a batch commit and can cost up to the 30 s / 60 s timeouts.
+  - **Solution:** Add a per-row failure count (additive column) or a per-scan retry cap, and skip probing when `commands/system.rs::dependency_status` (FEAT-4) says the tool is missing, so rows are retried once it is installed.
 
 - [ ] **CHORE-6 · Low · Confirmed** — Fill in metadata and the window defaults.
   - **Location:** `src-tauri/Cargo.toml:4-5`, `tauri.conf.json:13-19`
@@ -327,7 +327,6 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 - [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold. Needs the dialog plugin re-added (removed 2026-11-11 by SEC-7/DEP-2): the `tauri-plugin-dialog` crate, `.plugin(tauri_plugin_dialog::init())` in `lib.rs`, the `@tauri-apps/plugin-dialog` npm package, and a narrow `dialog:allow-open` permission in `capabilities/default.json` (not `dialog:default`).
 - [ ] **FEAT-2 (Medium)** Incremental updates via filesystem watching (`notify` crate) instead of full rescans.
-- [ ] **FEAT-4 (Medium)** Startup dependency check for `mpv`, `ffmpeg`, `ffprobe` with a friendly message.
 - [ ] **FEAT-5 (Low)** Search / filter across the library.
 - [ ] **FEAT-6 (Low)** Manually edit season/episode numbers for a file (sets `user_pinned`).
 - [ ] **FEAT-7 (Low)** Subtitle management.
@@ -352,6 +351,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **FEAT-4**: `check_dependencies` command (PATH lookup, no spawn, unit-tested) + persistent startup toast naming missing tools and what breaks.
 - [x] 2026-11-11 **FEAT-3**: toast store (`store/toastStore.js`) + `Toaster` in MainLayout; App/Movies/Others/Dashboard/Sidebar show backend errors instead of `catch {}`; a failed scan shows one replaceable toast and keeps the cached library. Remaining SeriesDetail/modal adoption: MAINT-3.
 - [x] 2026-11-11 **MAINT-1**: merge/rename/suggestion UI wired in: SeriesIndex shows `MergeSuggestionBanner` (refetched when groups or counts change); the SeriesDetail header has `GroupActionsMenu` → `RenameGroupModal`/`MergeGroupModal` (on ui/Modal, Cancel focused for merge); merging away the open series navigates to the target. `GroupTabs`, `ShowCard`, `ui/Tab` deleted as unused. Follow-ups: MAINT-5, MAINT-6, MAINT-7.
 - [x] 2026-11-11 **MAINT-4**: AGENT.md §3 file map, §7 and §8 re-synced with the code after MAINT-1; §7 keeps only sharp edges and points to this file for the backlog.
