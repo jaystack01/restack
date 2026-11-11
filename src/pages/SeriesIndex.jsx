@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, Tv } from "lucide-react";
 import { motion } from "framer-motion";
 import { getSeries, subscribe } from "../store/libraryStore";
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { getMergeSuggestions, refreshLibrary } from "../api";
 import Input from "../components/ui/Input";
+import MergeSuggestionBanner from "../components/library/MergeSuggestionBanner";
 
 export default function SeriesIndex() {
   const navigate = useNavigate();
@@ -15,6 +17,43 @@ export default function SeriesIndex() {
     const unsub = subscribe(() => setSeries(getSeries()));
     return unsub;
   }, []);
+
+  // Refetch suggestions only when groups or their episode counts change, not
+  // on every playback progress tick that also notifies the store
+  const groupsSignature = useMemo(
+    () =>
+      series
+        .map(
+          (s) =>
+            `${s.groupId}:${s.displayName}:${s.seasons.reduce(
+              (acc, season) => acc + season.episodes.length,
+              0,
+            )}`,
+        )
+        .join("|"),
+    [series],
+  );
+
+  const [suggestions, setSuggestions] = useState([]);
+  useEffect(() => {
+    let cancelled = false;
+    getMergeSuggestions()
+      .then((data) => {
+        if (!cancelled) setSuggestions(data);
+      })
+      .catch((err) => console.error("Failed to load merge suggestions:", err));
+    return () => {
+      cancelled = true;
+    };
+  }, [groupsSignature]);
+
+  async function onMerged() {
+    try {
+      await refreshLibrary();
+    } catch (err) {
+      console.error("Failed to refresh library:", err);
+    }
+  }
 
   const filtered = search.trim()
     ? series.filter((s) =>
@@ -72,6 +111,8 @@ export default function SeriesIndex() {
           />
         </div>
       </div>
+
+      <MergeSuggestionBanner suggestions={suggestions} onMerged={onMerged} />
 
       {filtered.length === 0 ? (
         <div className="flex flex-col items-center justify-center p-12 text-center rounded-2xl bg-surface border border-border shadow-sm">

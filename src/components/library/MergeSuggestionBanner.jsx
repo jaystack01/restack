@@ -1,87 +1,96 @@
 import { useState } from "react";
-import { AlertTriangle, GitMerge } from "lucide-react";
+import { GitMerge, Info } from "lucide-react";
 import MergeGroupModal from "./MergeGroupModal";
 import Button from "../ui/Button";
 
+const pairKey = (s) => `${s.groupIdA}-${s.groupIdB}`;
+
+/**
+ * Lists near-duplicate series names (from getMergeSuggestions). Merge opens
+ * the merge dialog with the smaller group as the source and the larger one
+ * preselected as the target. Dismissals last until the page unmounts.
+ * onMerged() — a merge worked, parent should refresh the library
+ */
 export default function MergeSuggestionBanner({ suggestions, onMerged }) {
-  // Track dismissed suggestion pairs
-  const [dismissed, setDismissed] = useState(new Set());
+  const [dismissed, setDismissed] = useState(() => new Set());
   const [mergeTarget, setMergeTarget] = useState(null);
 
-  const visible = suggestions.filter(
-    (s) => !dismissed.has(`${s.groupIdA}-${s.groupIdB}`),
-  );
-
-  if (visible.length === 0) return null;
+  const visible = suggestions.filter((s) => !dismissed.has(pairKey(s)));
 
   function dismiss(s) {
-    setDismissed((prev) => new Set([...prev, `${s.groupIdA}-${s.groupIdB}`]));
+    setDismissed((prev) => new Set([...prev, pairKey(s)]));
+  }
+
+  function openMerge(s) {
+    // Fold the smaller group into the larger one by default
+    const aIntoB = s.episodeCountA <= s.episodeCountB;
+    setMergeTarget({
+      sourceGroupId: aIntoB ? s.groupIdA : s.groupIdB,
+      sourceDisplayName: aIntoB ? s.displayNameA : s.displayNameB,
+      suggestedTargetId: aIntoB ? s.groupIdB : s.groupIdA,
+    });
   }
 
   return (
     <>
-      <div className="mb-6 rounded-xl border border-amber-500/20 bg-amber-500/5 p-4 space-y-3 shadow-md animate-in select-none">
-        <div className="flex items-center gap-2 text-amber-400">
-          <AlertTriangle className="w-4 h-4 shrink-0" />
-          <span className="text-xs font-bold uppercase tracking-wider">
-            Possible duplicate series groups
-          </span>
-        </div>
+      {visible.length > 0 && (
+        <div
+          className="rounded-xl border border-accent/20 bg-accent/5 p-4 space-y-3 shadow-premium select-none"
+          role="region"
+          aria-label="Possible duplicate series"
+        >
+          <div className="flex items-center gap-2 text-accent">
+            <Info className="w-4 h-4 shrink-0" />
+            <span className="text-xs font-bold uppercase tracking-wider">
+              Possible duplicate series
+            </span>
+          </div>
 
-        <div className="flex flex-col gap-2.5">
-          {visible.map((s) => (
-            <div
-              key={`${s.groupIdA}-${s.groupIdB}`}
-              className="flex flex-col sm:flex-row sm:items-center sm:justify-between py-2.5 border-t border-amber-500/10 gap-3"
-            >
-              <div className="flex items-center gap-2 flex-wrap min-w-0 flex-1 text-sm text-zinc-300">
-                <span className="font-semibold text-white bg-zinc-900 border border-border px-2.5 py-0.5 rounded-full text-xs">
-                  {s.displayNameA}
-                  <span className="text-zinc-500 ml-1.5">
-                    ({s.episodeCountA} ep)
+          <ul className="flex flex-col">
+            {visible.map((s) => (
+              <li
+                key={pairKey(s)}
+                className="flex flex-col sm:flex-row sm:items-center sm:justify-between py-2.5 border-t border-accent/10 gap-3"
+              >
+                <div className="flex items-center gap-2 flex-wrap min-w-0 flex-1 text-sm">
+                  <span className="font-semibold text-text-primary bg-surface-card border border-border px-2.5 py-0.5 rounded-full text-xs">
+                    {s.displayNameA}
+                    <span className="text-text-muted ml-1.5">
+                      ({s.episodeCountA} ep)
+                    </span>
                   </span>
-                </span>
-                <span className="text-zinc-500 text-xs">and</span>
-                <span className="font-semibold text-white bg-zinc-900 border border-border px-2.5 py-0.5 rounded-full text-xs">
-                  {s.displayNameB}
-                  <span className="text-zinc-500 ml-1.5">
-                    ({s.episodeCountB} ep)
+                  <span className="text-text-muted text-xs">and</span>
+                  <span className="font-semibold text-text-primary bg-surface-card border border-border px-2.5 py-0.5 rounded-full text-xs">
+                    {s.displayNameB}
+                    <span className="text-text-muted ml-1.5">
+                      ({s.episodeCountB} ep)
+                    </span>
                   </span>
-                </span>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <Button
-                  onClick={() =>
-                    setMergeTarget({
-                      sourceGroupId: s.groupIdA,
-                      sourceDisplayName: s.displayNameA,
-                    })
-                  }
-                  size="sm"
-                  variant="primary"
-                  className="bg-amber-500 hover:bg-amber-600 text-white border-amber-600/35 hover:scale-[1.01] flex items-center gap-1.5"
-                >
-                  <GitMerge className="w-3.5 h-3.5" />
-                  <span>Merge</span>
-                </Button>
-                <Button
-                  onClick={() => dismiss(s)}
-                  size="sm"
-                  variant="ghost"
-                  className="text-zinc-400 hover:text-zinc-200"
-                >
-                  Dismiss
-                </Button>
-              </div>
-            </div>
-          ))}
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  <Button
+                    onClick={() => openMerge(s)}
+                    size="sm"
+                    variant="primary"
+                  >
+                    <GitMerge className="w-3.5 h-3.5" />
+                    <span>Merge…</span>
+                  </Button>
+                  <Button onClick={() => dismiss(s)} size="sm" variant="ghost">
+                    Dismiss
+                  </Button>
+                </div>
+              </li>
+            ))}
+          </ul>
         </div>
-      </div>
+      )}
 
       {mergeTarget && (
         <MergeGroupModal
           sourceGroupId={mergeTarget.sourceGroupId}
           sourceDisplayName={mergeTarget.sourceDisplayName}
+          suggestedTargetId={mergeTarget.suggestedTargetId}
           onClose={() => setMergeTarget(null)}
           onSuccess={() => {
             setMergeTarget(null);

@@ -5,6 +5,7 @@ import {
   getLibraryGrouped,
   moveEpisodes,
   playMedia,
+  refreshLibrary,
   renameGroup,
   restoreEpisodes,
   scanUserStorage,
@@ -26,6 +27,9 @@ import { motion, AnimatePresence } from "framer-motion";
 import EpisodeGrid from "../components/library/EpisodeGrid";
 import EpisodeList from "../components/library/EpisodeList";
 import MultiSelectBar from "../components/library/MultiSelectBar";
+import GroupActionsMenu from "../components/library/GroupActionsMenu";
+import RenameGroupModal from "../components/library/RenameGroupModal";
+import MergeGroupModal from "../components/library/MergeGroupModal";
 import Button from "../components/ui/Button";
 import Input from "../components/ui/Input";
 import Select from "../components/ui/Select";
@@ -63,6 +67,8 @@ export default function SeriesDetail() {
   const [pendingDeleteEpisodes, setPendingDeleteEpisodes] = useState([]);
   const [renamingGroupId, setRenamingGroupId] = useState(null);
   const [renameValue, setRenameValue] = useState("");
+  const [renameModalOpen, setRenameModalOpen] = useState(false);
+  const [mergeModalOpen, setMergeModalOpen] = useState(false);
   const [focusedEpisodeId, setFocusedEpisodeId] = useState(null);
   const [lastSelectedEpisodeId, setLastSelectedEpisodeId] = useState(null);
   const [playingFilePath, setPlayingFilePathLocal] = useState(
@@ -85,10 +91,13 @@ export default function SeriesDetail() {
   // Don't let the Undo banner timer fire after the page is gone
   useEffect(() => () => clearTimeout(undoTimerRef.current), []);
 
-  // The route reuses this component across series, so drop selection from the previous one
+  // The route reuses this component across series, so drop selection and
+  // open group dialogs from the previous one
   useEffect(() => {
     setSelectedEpisodes(new Set());
     setLastSelectedEpisodeId(null);
+    setRenameModalOpen(false);
+    setMergeModalOpen(false);
   }, [groupId]);
 
   useEffect(() => {
@@ -427,6 +436,27 @@ export default function SeriesDetail() {
     }
   }
 
+  async function onRenamed() {
+    setRenameModalOpen(false);
+    try {
+      await refreshLibrary();
+    } catch {
+      setError("Failed to refresh the library.");
+    }
+  }
+
+  async function onMerged(targetGroupId) {
+    setMergeModalOpen(false);
+    // This group no longer exists. Go to the target first, so the
+    // "group not found" redirect to /series doesn't fire after the refresh.
+    navigate(`/series/${targetGroupId}`, { replace: true });
+    try {
+      await refreshLibrary();
+    } catch {
+      setError("Failed to refresh the library.");
+    }
+  }
+
   // Keyboard navigation. The handler is rebuilt every render; the window
   // listener is bound once and always calls the current one through a ref,
   // so it never runs a stale closure.
@@ -440,7 +470,13 @@ export default function SeriesDetail() {
     )
       return;
     // Leave keys to an open dialog, so Enter activates its focused button
-    if (deleteConfirmOpen || e.target?.closest?.("[role=dialog]")) return;
+    if (
+      deleteConfirmOpen ||
+      renameModalOpen ||
+      mergeModalOpen ||
+      e.target?.closest?.("[role=dialog]")
+    )
+      return;
 
     if ((e.ctrlKey || e.metaKey) && key === "a") {
       e.preventDefault();
@@ -566,37 +602,51 @@ export default function SeriesDetail() {
       <section className="space-y-6">
         {/* Detail Header controls */}
         <div className="flex flex-col md:flex-row md:items-start md:justify-between gap-6">
-          <div className="flex-1 min-w-0">
-            {renamingGroupId === selectedGroupData.groupId ? (
-              <input
-                autoFocus
-                value={renameValue}
-                onChange={(e) => setRenameValue(e.target.value)}
-                onBlur={submitInlineRename}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") submitInlineRename();
-                  if (e.key === "Escape") setRenamingGroupId(null);
-                }}
-                className="w-full max-w-xl text-3xl font-display font-extrabold text-white bg-surface-card border border-border focus:border-accent rounded-lg px-3 py-1.5 outline-none transition-colors duration-200 shadow-inner"
+          <div className="flex-1 min-w-0 flex items-start gap-2">
+            {/* Grows only while the inline rename input is shown, so the
+                actions menu otherwise sits next to the title */}
+            <div
+              className={`min-w-0 ${
+                renamingGroupId === selectedGroupData.groupId ? "flex-1" : ""
+              }`}
+            >
+              {renamingGroupId === selectedGroupData.groupId ? (
+                <input
+                  autoFocus
+                  value={renameValue}
+                  onChange={(e) => setRenameValue(e.target.value)}
+                  onBlur={submitInlineRename}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") submitInlineRename();
+                    if (e.key === "Escape") setRenamingGroupId(null);
+                  }}
+                  className="w-full max-w-xl text-3xl font-display font-extrabold text-white bg-surface-card border border-border focus:border-accent rounded-lg px-3 py-1.5 outline-none transition-colors duration-200 shadow-inner"
+                />
+              ) : (
+                <h2
+                  className="group inline-flex items-center gap-3 text-3xl font-display font-extrabold tracking-tight text-white cursor-pointer hover:text-accent transition-colors duration-200"
+                  onClick={() => {
+                    setRenamingGroupId(selectedGroupData.groupId);
+                    setRenameValue(selectedGroupData.displayName);
+                  }}
+                  title="Click to rename series display name"
+                >
+                  <span>{selectedGroupData.displayName}</span>
+                  <Edit2 className="w-4 h-4 text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity" />
+                </h2>
+              )}
+              <p className="text-sm text-zinc-400 mt-1">
+                {selectedGroupData.episodeCount} Episodes ·{" "}
+                {selectedGroupData.seasonCount} Season
+                {selectedGroupData.seasonCount !== 1 ? "s" : ""}
+              </p>
+            </div>
+            <div className="pt-0.5 shrink-0">
+              <GroupActionsMenu
+                onRename={() => setRenameModalOpen(true)}
+                onMerge={() => setMergeModalOpen(true)}
               />
-            ) : (
-              <h2
-                className="group inline-flex items-center gap-3 text-3xl font-display font-extrabold tracking-tight text-white cursor-pointer hover:text-accent transition-colors duration-200"
-                onClick={() => {
-                  setRenamingGroupId(selectedGroupData.groupId);
-                  setRenameValue(selectedGroupData.displayName);
-                }}
-                title="Click to rename series display name"
-              >
-                <span>{selectedGroupData.displayName}</span>
-                <Edit2 className="w-4 h-4 text-zinc-500 opacity-0 group-hover:opacity-100 transition-opacity" />
-              </h2>
-            )}
-            <p className="text-sm text-zinc-400 mt-1">
-              {selectedGroupData.episodeCount} Episodes ·{" "}
-              {selectedGroupData.seasonCount} Season
-              {selectedGroupData.seasonCount !== 1 ? "s" : ""}
-            </p>
+            </div>
           </div>
 
           {/* List and Layout mode selectors */}
@@ -762,6 +812,24 @@ export default function SeriesDetail() {
           </div>
         )}
       </section>
+
+      {renameModalOpen && (
+        <RenameGroupModal
+          groupId={selectedGroupData.groupId}
+          currentName={selectedGroupData.displayName}
+          onClose={() => setRenameModalOpen(false)}
+          onSuccess={onRenamed}
+        />
+      )}
+
+      {mergeModalOpen && (
+        <MergeGroupModal
+          sourceGroupId={selectedGroupData.groupId}
+          sourceDisplayName={selectedGroupData.displayName}
+          onClose={() => setMergeModalOpen(false)}
+          onSuccess={onMerged}
+        />
+      )}
 
       {/* Delete Confirmation Modal */}
       <Modal
