@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Search, FileVideo, Check, FolderOpen } from "lucide-react";
 import { motion } from "framer-motion";
 import { playMedia } from "../api";
+import { showError } from "../store/toastStore";
 import {
   getOthers,
   getPlayingFilePath,
@@ -45,8 +46,8 @@ export default function OthersPage() {
   async function playFile(item) {
     try {
       await playMedia(item.filePath);
-    } catch {
-      // silent
+    } catch (err) {
+      showError(err, { context: "Couldn't play file" });
     }
   }
 

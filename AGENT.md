@@ -124,7 +124,8 @@ src/
   index.css                  Tailwind v4 `@theme` design tokens (colors, fonts, shadows)
   api.js                     One wrapper per Tauri command, plus refreshLibrary() (get_library_grouped → setLibrary)
   store/libraryStore.js      Hand-rolled pub/sub store (library + currently playing path and session)
-  layouts/MainLayout.jsx     Shell: Sidebar + main + TopSyncBar + FirstScanOverlay
+  store/toastStore.js        Pub/sub store for app-wide toasts (showToast, showError, dismissToast)
+  layouts/MainLayout.jsx     Shell: Sidebar + main + TopSyncBar + FirstScanOverlay + Toaster
   layouts/Sidebar.jsx        Nav, series list, drag-and-drop reclassify targets
   pages/Dashboard.jsx        Continue Watching / Up Next
   pages/SeriesIndex.jsx      Grid of all series + MergeSuggestionBanner
@@ -135,7 +136,8 @@ src/
   pages/OthersPage.jsx       Unclassified files
   components/library/*       Domain components (EpisodeGrid/List, GroupActionsMenu, RenameGroupModal,
                              MergeGroupModal, MergeSuggestionBanner, other modals and banners…)
-  components/ui/*            Primitives (Button, Checkbox, Input, Modal, Select, FirstScanOverlay)
+  components/ui/*            Primitives (Button, Checkbox, Input, Modal, Select, FirstScanOverlay,
+                             Toaster)
   utils/cn.js                clsx + tailwind-merge
 
 src-tauri/src/
@@ -320,6 +322,7 @@ Episode/movie/other cards set `dataTransfer` `text/plain` to `JSON.stringify({ m
 - **Motion**: `framer-motion` (`motion`, `AnimatePresence`). **Icons**: `lucide-react`.
 - Dark-only UI, rounded cards, `select-none` app shell.
 - `components/ui/Modal` is an accessible dialog: `role=dialog`, focus trap, Escape closes it, and focus returns to the previous element on close. Mark the child that should get initial focus with `data-autofocus` (prefer Cancel for destructive confirms). Page-level `window` key handlers must ignore events while a dialog is open or whose target is inside `[role=dialog]`. A menu or popover inside a page that has `window` shortcuts must `stopPropagation` its own keydown (see `GroupActionsMenu`).
+- **Errors**: show backend errors with `showError(err, { context: "Couldn't …" })` from `store/toastStore.js` (rendered by `Toaster` in MainLayout), never `catch {}`. Give repeatable failures a fixed `id` so they replace one toast instead of stacking, pass `duration: null` for a toast that must stay until dismissed, and don't toast expected no-ops.
 - Thumbnails: always `convertFileSrc(thumbnailPath)`, and `draggable="false"` on `<img>`.
 
 ---
@@ -333,9 +336,9 @@ Check these before you assume a behaviour is intended. This list only covers sha
 3. **Missing vs soft-deleted rows**: a rescan never purges soft-deleted rows, and hides (rather than deletes) rows whose storage may be offline (`missing_since`). Neither kind is purged automatically yet (see BUG-35).
 4. `get_all_groups` and merge-suggestion counts include only live series rows; merge suggestions skip groups with no live episodes. Groups whose only rows are trashed or missing are kept (for Undo/remount) and show 0 episodes in pickers.
 5. Unchanged files that aren't re-probed (and failed retries) get `duration = 0` / `thumb = None` on rescan. The upserts handle this via `CASE`/`COALESCE`, so preserve that logic if you edit upserts.
-6. Many `invoke` calls swallow errors (`catch {}`). The App-level scan is intentionally silent.
+6. Backend errors are shown as toasts (FEAT-3) in App, Movies, Others, Dashboard, and Sidebar. A failed scan shows one replaceable toast and keeps the cached library. SeriesDetail still uses its own sticky red `error` banner until MAINT-3.
 7. `index.css` imports Google Fonts. That conflicts with offline-first, and the CSP (`default-src 'self'`) likely blocks it in the webview, so the system font fallback is what renders.
-8. A DB read error in the library or Continue Watching queries now returns `Err` (shown to the user, see DES-2) instead of silently hiding rows, so one corrupt row fails the whole library load. `get_episode_meta`/`get_next_episode` still return `Option` and only log errors (DES-9).
+8. A DB read error in the library or Continue Watching queries now returns `Err` (shown as a toast) instead of silently hiding rows, so one corrupt row fails the whole library load rather than hiding one item. `get_episode_meta`/`get_next_episode` still return `Option` and only log errors (DES-9).
 9. mpv sockets live in `$XDG_RUNTIME_DIR/mpv-<uuid>.sock` (fallback `/tmp/mpv-<uuid>.sock`, see `mpv_socket_dir`) and are cleaned up when the tracker ends.
 
 ---

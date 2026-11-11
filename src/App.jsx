@@ -14,10 +14,17 @@ import {
   setPlayingFilePath,
   clearPlayingSession,
 } from "./store/libraryStore";
+import { dismissToast, showError, showToast } from "./store/toastStore";
 
 // How long the scanning state must stay visible (ms).
 // Prevents flickering when the scan completes in <100ms.
 const MIN_SCAN_DISPLAY_MS = 1000;
+
+// Fixed toast id so repeated scan failures replace one toast, not stack.
+const SCAN_TOAST_ID = "scan-error";
+
+// The guard's rejection when another scan (or a Trash batch) holds it.
+const SCAN_BUSY = "A scan is already running";
 
 const IDLE_SCAN_STATE = {
   phase: "idle",
@@ -49,8 +56,16 @@ function App() {
     let libraryData = null;
     try {
       libraryData = await scanUserStorage();
-    } catch {
-      // silent
+      dismissToast(SCAN_TOAST_ID);
+    } catch (err) {
+      // The cached library stays on screen; only the refresh failed.
+      if (err === SCAN_BUSY) {
+        showToast("A scan or Trash operation is already running.", {
+          id: SCAN_TOAST_ID,
+        });
+      } else {
+        showError(err, { context: "Library scan failed", id: SCAN_TOAST_ID });
+      }
     }
 
     // ── Minimum display time ────────────────────────────────────────────
@@ -130,8 +145,9 @@ function App() {
           setLibrary(cached);
           setHasLibraryLoaded(true);
         }
-      } catch {
-        // fall through to the scan
+      } catch (err) {
+        // Still run the scan, which may rebuild the library.
+        if (!cancelled) showError(err, { context: "Couldn't load library" });
       }
 
       // Now safe to scan — listeners are live. Skip if this mount was
@@ -156,7 +172,9 @@ function App() {
           const nextPath =
             typeof event.payload === "string" ? event.payload : null;
           if (!nextPath) return;
-          playMedia(nextPath).catch(() => {});
+          playMedia(nextPath).catch((err) =>
+            showError(err, { context: "Couldn't play next episode" }),
+          );
         }),
       ]).then(track);
     };

@@ -107,8 +107,8 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **BUG-27 · Low · Confirmed** — Dashboard "Continue Watching" goes stale.
   - **Location:** `src/pages/Dashboard.jsx:29-33`
-  - **Problem:** It's fetched once on mount, so it doesn't refresh after playback stops, after auto-play next, or after a scan while the Dashboard is visible. `onResume` (`:76-81`) has no `.catch`, so it throws an unhandled rejection if mpv is missing.
-  - **Solution:** Refetch on `video_playback_stopped` / library changes (subscribe), and add error handling.
+  - **Problem:** It's fetched once on mount, so it doesn't refresh after playback stops, after auto-play next, or after a scan while the Dashboard is visible.
+  - **Solution:** Refetch on `video_playback_stopped` / library changes (subscribe). (Errors are shown as toasts since FEAT-3.)
 
 - [ ] **BUG-29 · Low · Confirmed** — Reclassify-to-series edge cases.
   - **Location:** `src-tauri/src/db.rs:497-526`
@@ -276,10 +276,10 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
   - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `commands/scanner.rs:199-202` (`get_scan_roots` unused, keep for FEAT-1)
   - **Solution:** Remove these during the next touch of each file.
 
-- [ ] **MAINT-3 · Low · Confirmed** — SeriesDetail error banner is sticky and errors are generic.
-  - **Location:** `src/pages/SeriesDetail.jsx:32,476-481`
-  - **Problem:** `error` is never cleared, so one failure keeps the red banner up for the rest of the session. Messages drop the backend's string ("Failed to delete episodes." instead of the actual `Failed to trash file …`).
-  - **Solution:** Auto-dismiss or clear on the next successful action, and include the backend message. Fold into FEAT-3.
+- [ ] **MAINT-3 · Low · Confirmed** — SeriesDetail and the library modals don't use toasts yet.
+  - **Location:** `src/pages/SeriesDetail.jsx` (`error` state and its red banner, `fetchLibrary`), `src/components/library/*` modals (`MergeGroupModal`, `RenameGroupModal`, move dialog)
+  - **Problem:** `error` is never cleared, so one failure keeps the red banner up for the rest of the session, and messages drop the backend's string ("Failed to delete episodes." instead of the actual `Failed to trash file …`). The modals show their own generic messages.
+  - **Solution:** FEAT-3's `showError(err, { context })` is ready: replace SeriesDetail's sticky banner with it, and adopt it in the `components/library` modals.
 
 - [ ] **MAINT-5 · Low · Improvement** — SeriesDetail has two rename paths.
   - **Location:** `src/pages/SeriesDetail.jsx` (inline title rename, `fetchLibrary`; `GroupActionsMenu` → `RenameGroupModal`)
@@ -295,6 +295,11 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
   - **Location:** `src/components/library/MergeSuggestionBanner.jsx`, `GroupActionsMenu.jsx`, `MergeGroupModal.jsx`
   - **Problem:** The banner keeps a merged pair until the suggestions refetch returns. `GroupActionsMenu` stays open when focus tabs away, and swallows page shortcuts while its trigger is focused. A `MergeGroupModal` load failure shows a generic message instead of the backend error.
   - **Solution:** Drop the pair from the banner locally on merge success; close the menu on focus-out and only stop propagation of keys the menu handles; show the backend error (FEAT-3 `showError`).
+
+- [ ] **MAINT-8 · Low · Improvement** — No danger/warning colour tokens.
+  - **Location:** `src/index.css` `@theme`; raw red/amber classes in `components/ui/Toaster.jsx`, `components/ui/Button.jsx`, `pages/SeriesDetail.jsx`, `components/library/MergeGroupModal.jsx`, `components/library/MergeSuggestionBanner.jsx`
+  - **Problem:** Error and warning UI (new toasts included) hard-codes `red-*`/`amber-*` values, so they drift and can't be themed.
+  - **Solution:** Add `--color-danger*` and `--color-warning*` tokens to `@theme` and migrate these components (part of CHORE-5).
 
 - [ ] **CHORE-4 · Low · Improvement** — Split `pages/SeriesDetail.jsx` (~880 lines).
   - **Solution:** Extract `useEpisodeSelection` (selection, range, keyboard), `useUndoDelete`, `SeasonSection`, and `SeriesHeader` (inline rename). BUG-8 and BUG-22 are done, so the move is now a pure refactor.
@@ -322,7 +327,6 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 - [ ] **FEAT-1 (Medium)** Settings page: choose scan roots (uses existing `scan_and_sync` / `get_scan_roots`; SEC-2 fixed 2026-11-01, so it is safe to call per root), excluded dirs, watched threshold. Needs the dialog plugin re-added (removed 2026-11-11 by SEC-7/DEP-2): the `tauri-plugin-dialog` crate, `.plugin(tauri_plugin_dialog::init())` in `lib.rs`, the `@tauri-apps/plugin-dialog` npm package, and a narrow `dialog:allow-open` permission in `capabilities/default.json` (not `dialog:default`).
 - [ ] **FEAT-2 (Medium)** Incremental updates via filesystem watching (`notify` crate) instead of full rescans.
-- [ ] **FEAT-3 (Medium)** Surface errors in the UI (toast) instead of `catch {}`, especially for mpv/ffmpeg missing on `PATH`. Include a failed startup scan (BUG-14 made per-file failures non-fatal, but a whole failed scan is still silent in `App.jsx`). Silent catches today: `App.jsx:52,126,156`, `MoviesPage.jsx:31`, `OthersPage.jsx:39`, `Dashboard.jsx:32`, `Sidebar.jsx:59`.
 - [ ] **FEAT-4 (Medium)** Startup dependency check for `mpv`, `ffmpeg`, `ffprobe` with a friendly message.
 - [ ] **FEAT-5 (Low)** Search / filter across the library.
 - [ ] **FEAT-6 (Low)** Manually edit season/episode numbers for a file (sets `user_pinned`).
@@ -348,6 +352,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **FEAT-3**: toast store (`store/toastStore.js`) + `Toaster` in MainLayout; App/Movies/Others/Dashboard/Sidebar show backend errors instead of `catch {}`; a failed scan shows one replaceable toast and keeps the cached library. Remaining SeriesDetail/modal adoption: MAINT-3.
 - [x] 2026-11-11 **MAINT-1**: merge/rename/suggestion UI wired in: SeriesIndex shows `MergeSuggestionBanner` (refetched when groups or counts change); the SeriesDetail header has `GroupActionsMenu` → `RenameGroupModal`/`MergeGroupModal` (on ui/Modal, Cancel focused for merge); merging away the open series navigates to the target. `GroupTabs`, `ShowCard`, `ui/Tab` deleted as unused. Follow-ups: MAINT-5, MAINT-6, MAINT-7.
 - [x] 2026-11-11 **MAINT-4**: AGENT.md §3 file map, §7 and §8 re-synced with the code after MAINT-1; §7 keeps only sharp edges and points to this file for the backlog.
 - [x] 2026-11-11 **BUG-45**: default roots from `/mnt` skip hidden entries (`mount_point_dirs`, temp-dir tested). Follow-up: BUG-49.

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getContinueWatching, playMedia } from "../api";
+import { showError } from "../store/toastStore";
 import { useNavigate } from "react-router-dom";
 import { Tv, Film, Folder } from "lucide-react";
 import { motion } from "framer-motion";
@@ -34,7 +35,14 @@ export default function Dashboard() {
   useEffect(() => {
     getContinueWatching()
       .then((item) => setContinueItem(item ?? null))
-      .catch(() => setContinueItem(null));
+      .catch((err) => {
+        setContinueItem(null);
+        // Fixed id: remounts (and StrictMode) replace the toast, not stack it
+        showError(err, {
+          context: "Couldn't load Continue Watching",
+          id: "continue-watching-error",
+        });
+      });
   }, []);
 
   const totalEpisodes = library.series.reduce(
@@ -78,7 +86,11 @@ export default function Dashboard() {
       <motion.div variants={itemVariants}>
         <ContinueWatchingRow
           item={continueItem}
-          onResume={(ep) => playMedia(ep.filePath)}
+          onResume={(ep) =>
+            playMedia(ep.filePath).catch((err) =>
+              showError(err, { context: "Couldn't play episode" }),
+            )
+          }
         />
       </motion.div>
 

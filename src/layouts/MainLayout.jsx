@@ -1,6 +1,7 @@
 import { motion, AnimatePresence } from "framer-motion";
 import Sidebar from "./Sidebar";
 import FirstScanOverlay from "../components/ui/FirstScanOverlay";
+import Toaster from "../components/ui/Toaster";
 
 /**
  * Thin progress strip at the very top of the window.
@@ -73,6 +74,8 @@ function MainLayout({
         isSyncing={isSyncing}
         visible={!hasLibraryLoaded}
       />
+
+      <Toaster />
     </div>
   );
 }

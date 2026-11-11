@@ -3,6 +3,7 @@ import { Search, Film, Play, Check } from "lucide-react";
 import { motion } from "framer-motion";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import { playMedia } from "../api";
+import { showError } from "../store/toastStore";
 import {
   getMovies,
   getPlayingFilePath,
@@ -38,8 +39,8 @@ export default function MoviesPage() {
   async function playMovie(movie) {
     try {
       await playMedia(movie.filePath);
-    } catch {
-      // silent
+    } catch (err) {
+      showError(err, { context: "Couldn't play movie" });
     }
   }
 

@@ -12,6 +12,7 @@ import {
 import { motion, AnimatePresence } from "framer-motion";
 import { cn } from "../utils/cn";
 import { reclassify, refreshLibrary } from "../api";
+import { showError } from "../store/toastStore";
 import {
   getSeries,
   getMovies,
@@ -46,19 +47,22 @@ function Sidebar({ onSync, isSyncing, scanState = {} }) {
   const handleDropReclassify = async (e, targetType, targetGroupId = null) => {
     e.preventDefault();
     setActiveDragTarget(null);
+    // Drops that aren't our cards (e.g. text from elsewhere) are ignored
+    let mediaIds;
     try {
-      const dataStr = e.dataTransfer.getData("text/plain");
-      if (!dataStr) return;
-      const data = JSON.parse(dataStr);
-      const { mediaIds } = data;
-      if (!mediaIds || !mediaIds.length) return;
+      mediaIds = JSON.parse(e.dataTransfer.getData("text/plain")).mediaIds;
+    } catch {
+      return;
+    }
+    if (!Array.isArray(mediaIds) || !mediaIds.length) return;
 
+    try {
       await reclassify(mediaIds, targetType, targetGroupId);
 
       // Refresh frontend store instantly
       await refreshLibrary();
     } catch (err) {
-      console.error("Reclassification failed:", err);
+      showError(err, { context: "Couldn't move media" });
     }
   };
 
