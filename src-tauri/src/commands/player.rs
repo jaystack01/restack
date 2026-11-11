@@ -26,6 +26,15 @@ struct ProgressPayload {
     watched: bool,
 }
 
+/// `video_playback_started` / `video_playback_stopped` payload. `session` lets
+/// the frontend ignore a replaced mpv's late stop event when the same file is
+/// replayed.
+#[derive(Clone, serde::Serialize)]
+struct PlaybackPayload {
+    file_path: String,
+    session: u64,
+}
+
 #[tauri::command]
 pub async fn set_watched_cmd(
     app: AppHandle,
@@ -242,7 +251,13 @@ fn start_playback(
     stop_player(raced);
 
     // Notify frontend
-    let _ = app.emit("video_playback_started", file_path.clone());
+    let _ = app.emit(
+        "video_playback_started",
+        PlaybackPayload {
+            file_path: file_path.clone(),
+            session,
+        },
+    );
 
     // 🧠 spawn background tracker
     let app_handle = app.clone();
@@ -253,6 +268,7 @@ fn start_playback(
             app_handle.clone(),
             socket_path,
             file_clone,
+            session,
             previously_watched,
         );
         // After every exit path (including a failed IPC connect) and after the events
@@ -481,6 +497,7 @@ fn track_progress(
     app: AppHandle,
     socket_path: String,
     file_path: String,
+    session: u64,
     previously_watched: bool,
 ) {
     println!("IPC connecting to {}", socket_path);
@@ -546,7 +563,13 @@ fn track_progress(
     let _ = std::fs::remove_file(&socket_path);
 
     println!("Tracker ended for {}", file_path);
-    let _ = app.emit("video_playback_stopped", file_path.clone());
+    let _ = app.emit(
+        "video_playback_stopped",
+        PlaybackPayload {
+            file_path: file_path.clone(),
+            session,
+        },
+    );
 
     // Emit only after the IPC loop has exited (see TrackerExit::play_next)
     if let Some(next_path) = play_next_after_close {
@@ -616,6 +639,19 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("child did not exit");
+    }
+
+    #[test]
+    fn playback_payload_is_snake_case_with_session() {
+        let json = serde_json::to_value(PlaybackPayload {
+            file_path: "/videos/a.mkv".to_string(),
+            session: 3,
+        })
+        .unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "file_path": "/videos/a.mkv", "session": 3 })
+        );
     }
 
     #[test]

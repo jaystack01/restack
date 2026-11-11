@@ -33,7 +33,7 @@ cd src-tauri && cargo test     # backend unit tests (in-memory SQLite + temp dir
 cd src-tauri && cargo clippy --all-targets -- -D warnings   # lint backend (kept at 0 warnings)
 ```
 
-- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations, aliases and merges, end-of-scan re-keying, group GC, live-only counts), `utils/scanner.rs` (walk + reconcile decisions, skip rules, username and default roots, `run_with_timeout`), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe, including per-file upsert failures forced by test-only SQLite triggers), `commands/player.rs` (recorded mpv IPC lines through `drive_ipc` with a fake clock: throttle, watched latch, pause, eof → play next, read errors; plus the resume/watched rules), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
+- **Tests**: backend only, as `#[cfg(test)]` modules in `db.rs` (in-memory SQLite: upsert/pinning invariants, missing/soft-delete rows, migrations, aliases and merges, end-of-scan re-keying, group GC, live-only counts), `utils/scanner.rs` (walk + reconcile decisions, skip rules, username and default roots, `run_with_timeout`), `utils/parser.rs` (table-driven filename classification cases, including regression tests for BUG-15 to BUG-18 and BUG-38), `commands/scanner.rs` (`sync_library` end to end on temp dirs with a fake probe, including per-file upsert failures forced by test-only SQLite triggers), `commands/player.rs` (recorded mpv IPC lines through `drive_ipc` with a fake clock: throttle, watched latch, pause, eof → play next, read errors; the resume/watched rules; mpv argument order, socket dir, session-scoped reaping with stand-in `true`/`sleep` children, and the playback event payload shape), and `models.rs` / `commands/library.rs` (`ScanGuard` exclusivity and release, Trash ops rejected during a scan, playback session ids strictly increase). They never touch the real DB, `$HOME`, or Trash. Tests for open bugs are `#[ignore = "BUG-x: …"]` and fail today; remove the `#[ignore]` when fixing that item (`cargo test -- --ignored` lists them).
 - **No frontend tests yet.** CI (`.github/workflows/ci.yml`) runs lint, format check, build, clippy, and tests on every push to `develop`/`main` and on PRs. Verify locally before committing with `npm run build`, `npm run lint`, `npm run format:check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test`.
 - **Formatting**: Prettier with default options for `src/` and the root JS/JSON/HTML/CSS (`.prettierignore` skips `src-tauri`, `dist`, and Markdown), and default `cargo fmt` for Rust. Run `npm run format` before committing; don't hand-format against it.
 
@@ -123,7 +123,7 @@ src/
                              Tauri event listeners, Ctrl/Cmd+R = rescan
   index.css                  Tailwind v4 `@theme` design tokens (colors, fonts, shadows)
   api.js                     One wrapper per Tauri command, plus refreshLibrary() (get_library_grouped → setLibrary)
-  store/libraryStore.js      Hand-rolled pub/sub store (library + currently playing path)
+  store/libraryStore.js      Hand-rolled pub/sub store (library + currently playing path and session)
   layouts/MainLayout.jsx     Shell: Sidebar + main + TopSyncBar + FirstScanOverlay
   layouts/Sidebar.jsx        Nav, series list, drag-and-drop reclassify targets
   pages/Dashboard.jsx        Continue Watching / Up Next
@@ -292,9 +292,9 @@ The frontend calls commands only through `src/api.js` (one exported function per
 |---|---|---|
 | `scan:start` | `{ total_files }` | snake_case payload |
 | `scan:progress` | `{ current, total, file_name }` | snake_case payload |
-| `video_playback_started` | `filePath` string | |
+| `video_playback_started` | `{ file_path, session }` | snake_case payload; `session` from `next_playback_session()` |
 | `video_progress_updated` | `{ file_path, last_position, watched }` | snake_case payload |
-| `video_playback_stopped` | `filePath` string | |
+| `video_playback_stopped` | `{ file_path, session }` | snake_case payload; frontend clears Playing only on a matching session (`clearPlayingSession`) |
 | `play_next_episode` | next `filePath` string | frontend calls `play_episode` |
 
 Event payload structs are **not** camelCase-renamed, unlike command return types. Keep the JS destructuring consistent with that.
@@ -308,7 +308,7 @@ Episode/movie/other cards set `dataTransfer` `text/plain` to `JSON.stringify({ m
 ## 6. Frontend conventions
 
 - **React 19, JSX (no TypeScript)**, function components + hooks, React Router v7 with **HashRouter** (`vite base: "./"`).
-- **State**: `libraryStore.js` only, with `getX()` / `setLibrary()` / `subscribe()` / `subscribePlaying()`. Components subscribe in `useEffect` and return the unsubscribe function. Don't add Redux/Zustand/Context for library data. `updateEpisodeProgress` copies only the path to the matching item and does not notify listeners when nothing changed.
+- **State**: `libraryStore.js` only, with `getX()` / `setLibrary()` / `subscribe()` / `subscribePlaying()`. Components subscribe in `useEffect` and return the unsubscribe function. Don't add Redux/Zustand/Context for library data. `updateEpisodeProgress` copies only the path to the matching item and does not notify listeners when nothing changed. The store also tracks the playing session: `setPlayingFilePath(path, session)` on start, `clearPlayingSession(session)` on stop (a no-op unless it matches), so a replaced mpv's late stop event can't clear a newer play. Components still read `getPlayingFilePath()` / `subscribePlaying()`.
 - Call the backend through `src/api.js`, never `invoke()` directly (`convertFileSrc` and `listen` are fine to import). After a mutating command, refresh with `await refreshLibrary()` (fetches `get_library_grouped` → `setLibrary`). Don't rescan unless that's the intent.
 - **Styling**: Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.js`). Use the tokens in `index.css` `@theme` (`bg-bg`, `bg-surface`, `bg-surface-card`, `text-text-secondary`, `text-accent`, `border-border`, `bg-progress`, `font-display`, …) over raw colors. Compose classes with `cn()`.
 - **Motion**: `framer-motion` (`motion`, `AnimatePresence`). **Icons**: `lucide-react`.

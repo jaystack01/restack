@@ -125,11 +125,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** It's fetched once on mount, so it doesn't refresh after playback stops, after auto-play next, or after a scan while the Dashboard is visible. `onResume` (`:76-81`) has no `.catch`, so it throws an unhandled rejection if mpv is missing.
   - **Solution:** Refetch on `video_playback_stopped` / library changes (subscribe), and add error handling.
 
-- [ ] **BUG-28 · Low · Confirmed** — A stale stop event clears "Playing" when the same file is replayed.
-  - **Location:** `src/App.jsx:144-148`, `src-tauri/src/commands/player.rs:138,279` (started/stopped emits)
-  - **Problem:** Replaying the same file kills the old mpv. The old tracker's `video_playback_stopped(path)` arrives after the new `video_playback_started(path)`, and the path compare passes, so the UI shows nothing playing.
-  - **Solution:** Include a playback session id (the socket uuid) in the start/stop payloads and compare that.
-
 - [ ] **BUG-29 · Low · Confirmed** — Reclassify-to-series edge cases.
   - **Location:** `src-tauri/src/db.rs:497-526`
   - **Problem:**
@@ -142,6 +137,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Location:** `src-tauri/src/commands/player.rs:154-168`
   - **Problem:** It waits at most 3 s for the socket. On a cold network/USB mount mpv can take longer, so playback works but no progress is saved, with no signal to the user. A `expect()` on `try_clone` at `:191` can also panic the thread.
   - **Solution:** Retry `connect` until the child exits (check `try_wait`) rather than a fixed count. Replace `expect` with an early return and a log.
+  - **Also (2026-11-11):** when the IPC connect fails, `track_progress` returns early without removing the socket or emitting `video_playback_stopped`, so the UI stays on "Playing" until the next play. Fix by emitting the stopped payload (`{ file_path, session }`) with its session on that path too.
 
 - [ ] **BUG-33 · Low · Confirmed** — Undefined Tailwind classes silently do nothing.
   - **Location:** `animate-in`/`fade-in`/`slide-in-from-top-2` (`SeriesDetail.jsx:484`, `MultiSelectBar.jsx:29`, `GroupActionsMenu.jsx:41`, `RenameGroupModal.jsx:42`, `MergeSuggestionBanner.jsx:23`) need the `tailwindcss-animate` plugin, which isn't installed. `bg-surface-2` (`RenameGroupModal.jsx:62`) isn't a theme token.
@@ -157,10 +153,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Purge `deleted_at` rows when their item is no longer in the Trash (`trash::os_limited::list`) or after N days. Offer a "Missing files" view (or a setting) to forget `missing_since` rows, and/or auto-purge after N days once FEAT-1 adds settings.
 
 - [ ] **BUG-37 · Low · Potential** — An old tracker's final flush can move Continue Watching back to the previous episode.
-  - **Location:** `src-tauri/src/commands/player.rs` `track_progress` (final flush after the IPC loop) and `start_playback` (kills the old mpv, outside the `player_process` lock since PERF-1)
+  - **Location:** `src-tauri/src/commands/player.rs` `track_progress` (final flush after the IPC loop) and `start_playback`; `src-tauri/src/db.rs` `update_progress`
   - **Problem:** Starting a different episode kills the old mpv; the old tracker's final flush calls `update_progress`, which also sets `app_state.last_watched_episode_id`. If that flush lands after the new tracker's first write, Continue Watching points at the old episode. The new tracker polls for its socket in 200 ms steps, so the old flush almost always lands first.
-  - **Related (since PERF-1):** the kill and spawn now happen outside the `player_process` lock. Two near-simultaneous `play_episode` calls keep the newest mpv and reap the loser, but their `video_playback_started` events can reach the frontend out of order.
-  - **Solution:** Have the final flush skip the pointer update when the tracker was superseded (e.g. a playback generation counter in `AppState`, which could also tag the start/stop events), or only set the pointer from the most recently started playback.
+  - **Related:** the kill and spawn happen outside the `player_process` lock (PERF-1). Session ids are assigned at spawn, not when the session is stored, so two racing plays' `video_playback_started` events can reach the frontend out of order.
+  - **Since 2026-11-11 (BUG-28/BUG-30):** the mechanism exists: `models::next_playback_session()` hands out increasing ids and each tracker knows its `session`.
+  - **Solution:** Make the pointer write in `db::update_progress` (or a new fn) conditional on the tracker's session still being current, e.g. a separate "current session" `AtomicU64` stored by `start_playback`, or a compare-and-set in SQL. For the event order, assign the session id under the lock at store time and have the frontend ignore lower ids.
 
 - [ ] **BUG-39 · Low · Improvement** — Show names that really end in a year lose it.
   - **Location:** `src-tauri/src/utils/parser.rs` `series_show_name` / `SHOW_YEAR_RE`
@@ -378,6 +375,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-28**: `video_playback_started`/`video_playback_stopped` carry `{ file_path, session }`, and the store clears Playing only when the stop's session matches the current one (`clearPlayingSession`), so a replaced mpv's late stop no longer clears a replay of the same file.
 - [x] 2026-11-11 **BUG-30**: each playback gets a session id (`next_playback_session`), `AppState.player_process` stores `PlayerSession { session, child }`, and the tracker's `reap_session` `try_wait`s only its own session's mpv after the post-loop events and clears the slot once it exited, so no zombie lingers and a newer mpv is never touched. Follow-up: BUG-46.
 - [x] 2026-11-11 **SEC-5**: the mpv IPC socket is created in `$XDG_RUNTIME_DIR` (per-user, mode 0700) when it is an absolute existing dir, falling back to `/tmp` (`mpv_socket_dir`, tested).
 - [x] 2026-11-11 **BUG-20**: Walk skips hidden dirs below a root (a hidden root is still walked); `/run/media/<user>` added to default roots; user name from `$USER`/`$LOGNAME` before the `$HOME` basename. Skipped non-trash subtrees (`ScanWalk.skipped_dirs`) are excluded from reconciliation, so rows indexed there earlier are left untouched. Follow-ups: BUG-44, BUG-45.

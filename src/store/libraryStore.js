@@ -2,6 +2,7 @@ let cachedLibrary = null; // { series: [], movies: [], others: [] }
 let listeners = [];
 
 let playingFilePath = null;
+let playingSession = null;
 let playingListeners = [];
 
 export function getLibrary() {
@@ -97,9 +98,20 @@ export function getPlayingFilePath() {
   return playingFilePath;
 }
 
-export function setPlayingFilePath(filePath) {
+/** `session` is the backend playback session that `filePath` belongs to. */
+export function setPlayingFilePath(filePath, session = null) {
   playingFilePath = filePath;
+  playingSession = session;
   playingListeners.forEach((l) => l(filePath));
+}
+
+/**
+ * Clear "Playing" only if `session` is still the current playback, so a
+ * replaced mpv's late stop event doesn't clear a newer play of the same file.
+ */
+export function clearPlayingSession(session) {
+  if (playingSession !== session) return;
+  setPlayingFilePath(null, null);
 }
 
 export function subscribePlaying(listener) {

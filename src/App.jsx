@@ -12,7 +12,7 @@ import {
   setLibrary,
   updateEpisodeProgress,
   setPlayingFilePath,
-  getPlayingFilePath,
+  clearPlayingSession,
 } from "./store/libraryStore";
 
 // How long the scanning state must stay visible (ms).
@@ -146,12 +146,11 @@ function App() {
           updateEpisodeProgress(file_path, last_position, watched);
         }),
         listen("video_playback_started", (event) => {
-          setPlayingFilePath(event.payload);
+          const { file_path, session } = event.payload;
+          setPlayingFilePath(file_path, session);
         }),
         listen("video_playback_stopped", (event) => {
-          if (getPlayingFilePath() === event.payload) {
-            setPlayingFilePath(null);
-          }
+          clearPlayingSession(event.payload.session);
         }),
         listen("play_next_episode", (event) => {
           const nextPath =
