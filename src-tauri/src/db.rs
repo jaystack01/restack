@@ -2,7 +2,7 @@ use crate::models::{
     ContinueWatchingItem, Episode, GroupInfo, LibraryResponse, MergeSuggestion, MovieItem,
     OtherItem, ParsedEpisode, SeasonGroup, ShowGroup,
 };
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use std::collections::{BTreeMap, HashSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -48,6 +48,16 @@ fn configure_connection(conn: &Connection) -> Result<(), String> {
         Err(e) => eprintln!("Failed to enable WAL journal mode, keeping the current one: {e}"),
     }
     Ok(())
+}
+
+/// Begin a write transaction that takes the write lock up front (`BEGIN IMMEDIATE`). Use it
+/// for every transaction that reads and then writes. A deferred transaction starts as a
+/// reader; in WAL, if another connection commits before its first write, the upgrade fails
+/// at once with `SQLITE_BUSY(_SNAPSHOT)` and the busy timeout never applies. An immediate
+/// one waits for the lock (up to the busy timeout) and then reads current data.
+/// Like `unchecked_transaction`, it takes `&Connection`; savepoints nest inside it.
+pub fn begin_write(conn: &Connection) -> rusqlite::Result<Transaction<'_>> {
+    Transaction::new_unchecked(conn, TransactionBehavior::Immediate)
 }
 
 pub fn init_schema(conn: &Connection) -> Result<(), String> {
@@ -225,9 +235,7 @@ pub fn migrate_existing_groups(conn: &Connection) -> Result<(), String> {
         return Ok(());
     }
 
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Failed to start group migration: {e}"))?;
+    let tx = begin_write(conn).map_err(|e| format!("Failed to start group migration: {e}"))?;
 
     let rows: Vec<(i64, String)> = {
         let mut stmt = tx
@@ -622,9 +630,7 @@ pub fn merge_groups(conn: &Connection, source_id: i64, target_id: i64) -> Result
         return Err("Source and target groups must be different".to_string());
     }
 
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Failed to start merge: {e}"))?;
+    let tx = begin_write(conn).map_err(|e| format!("Failed to start merge: {e}"))?;
 
     let source_name: String = tx
         .query_row(
@@ -677,9 +683,7 @@ pub fn move_episodes(
     media_ids: &[i64],
     target_group_id: i64,
 ) -> Result<(), String> {
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Failed to start move: {e}"))?;
+    let tx = begin_write(conn).map_err(|e| format!("Failed to start move: {e}"))?;
     for &media_id in media_ids {
         tx.execute(
             "UPDATE media SET group_id = ?1, user_pinned = 1 WHERE id = ?2",
@@ -699,9 +703,7 @@ pub fn reclassify_media(
     target_type: &str,
     target_group_id: Option<i64>,
 ) -> Result<(), String> {
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Failed to start reclassify: {e}"))?;
+    let tx = begin_write(conn).map_err(|e| format!("Failed to start reclassify: {e}"))?;
     for &media_id in media_ids {
         if target_type == "movie" {
             tx.execute(
@@ -906,9 +908,7 @@ pub fn get_playback_state(
 /// Manual mark watched/unwatched. Resets the position so the next play starts
 /// from the beginning, and doesn't move the Continue Watching pointer.
 pub fn set_watched(conn: &Connection, media_ids: &[i64], watched: bool) -> Result<(), String> {
-    let tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Failed to start watched update: {e}"))?;
+    let tx = begin_write(conn).map_err(|e| format!("Failed to start watched update: {e}"))?;
     for &media_id in media_ids {
         tx.execute(
             "UPDATE media SET watched = ?1, last_position = 0 WHERE id = ?2",
@@ -1488,9 +1488,8 @@ pub fn sync_missing_media(
     removed: &[String],
     missing: &[String],
 ) -> Result<(), String> {
-    let mut tx = conn
-        .unchecked_transaction()
-        .map_err(|e| format!("Failed to start missing-media transaction: {e}"))?;
+    let mut tx =
+        begin_write(conn).map_err(|e| format!("Failed to start missing-media transaction: {e}"))?;
     for file_path in removed {
         tx.execute("DELETE FROM media WHERE file_path = ?1", params![file_path])
             .map_err(|e| format!("Failed to remove missing media row: {e}"))?;
@@ -2734,6 +2733,111 @@ mod tests {
         assert_eq!(row::<i64>(&reader, "/v/a.s01e01.mkv", "last_position"), 50);
         reader.execute_batch("COMMIT").unwrap();
         assert_eq!(row::<i64>(&reader, "/v/a.s01e01.mkv", "last_position"), 70);
+    }
+
+    /// How long `with_concurrent_writer` holds the write lock.
+    const WRITER_HOLD: Duration = Duration::from_millis(200);
+
+    /// Run `f` while another connection holds the write lock: it opens an immediate
+    /// transaction, writes, and commits `WRITER_HOLD` later, the way a scan batch does.
+    fn with_concurrent_writer<T>(db: &TempDb, f: impl FnOnce() -> T) -> T {
+        let path = db.path();
+        let (locked_tx, locked) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            let conn = Connection::open(path).unwrap();
+            configure_connection(&conn).unwrap();
+            conn.execute_batch(
+                "BEGIN IMMEDIATE;
+                 INSERT OR REPLACE INTO app_state (key, value_text) VALUES ('writer', 'done');",
+            )
+            .unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(WRITER_HOLD);
+            conn.execute_batch("COMMIT").unwrap();
+        });
+        locked.recv().unwrap();
+        let result = f();
+        writer.join().unwrap();
+        result
+    }
+
+    fn writer_committed(conn: &Connection) -> bool {
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM app_state WHERE key = 'writer')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn deferred_read_then_write_fails_without_waiting() {
+        // The problem `begin_write` avoids: a deferred transaction that has read can't wait
+        // for the lock, so its first write fails at once instead of using the busy timeout.
+        let db = TempDb::new("deferred");
+        let conn = db.open();
+        init_schema(&conn).unwrap();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 100, None).unwrap();
+
+        let result = with_concurrent_writer(&db, || {
+            let tx = conn.unchecked_transaction().unwrap();
+            let _: i64 = row(&tx, "/v/a.s01e01.mkv", "id");
+            tx.execute("UPDATE media SET watched = 1", [])
+        });
+
+        let err = result.unwrap_err();
+        assert_eq!(
+            err.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::DatabaseBusy),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn write_transactions_wait_for_a_concurrent_writer() {
+        let db = TempDb::new("immediate");
+        let conn = db.open();
+        init_schema(&conn).unwrap();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 100, None).unwrap();
+        upsert_episode(&conn, "/v/a.s01e02.mkv", &ep("A", 1, 2), 100, None).unwrap();
+        upsert_episode(&conn, "/v/b.s01e01.mkv", &ep("B", 1, 1), 100, None).unwrap();
+        upsert_other(&conn, "/v/clip.mkv", "clip", 10, None).unwrap();
+        let a = row::<i64>(&conn, "/v/a.s01e01.mkv", "group_id");
+        let b = row::<i64>(&conn, "/v/b.s01e01.mkv", "group_id");
+        let a1 = id_of(&conn, "/v/a.s01e01.mkv");
+        let a2 = id_of(&conn, "/v/a.s01e02.mkv");
+        let clip = id_of(&conn, "/v/clip.mkv");
+
+        // Each of these reads before it writes; all must wait for the lock, not fail
+        type Op<'a> = Box<dyn FnOnce() -> Result<(), String> + 'a>;
+        let ops: Vec<(&str, Op)> = vec![
+            ("set_watched", Box::new(|| set_watched(&conn, &[a1], true))),
+            ("move_episodes", Box::new(|| move_episodes(&conn, &[a2], b))),
+            (
+                "reclassify_media",
+                Box::new(|| reclassify_media(&conn, &[clip], "series", Some(a))),
+            ),
+            ("merge_groups", Box::new(|| merge_groups(&conn, b, a))),
+            (
+                "sync_missing_media",
+                Box::new(|| sync_missing_media(&conn, &[], &["/v/a.s01e01.mkv".into()])),
+            ),
+            (
+                "migrate_existing_groups",
+                Box::new(|| migrate_existing_groups(&conn)),
+            ),
+        ];
+        for (name, op) in ops {
+            conn.execute("DELETE FROM app_state WHERE key = 'writer'", [])
+                .unwrap();
+            with_concurrent_writer(&db, op).unwrap_or_else(|e| panic!("{name}: {e}"));
+            assert!(writer_committed(&conn), "{name}");
+        }
+
+        assert_eq!(row::<i64>(&conn, "/v/a.s01e01.mkv", "watched"), 1);
+        assert_eq!(row::<i64>(&conn, "/v/b.s01e01.mkv", "group_id"), a);
+        assert_eq!(row::<i64>(&conn, "/v/clip.mkv", "group_id"), a);
+        assert!(row::<Option<i64>>(&conn, "/v/a.s01e01.mkv", "missing_since").is_some());
     }
 
     /// Sets a path's mode and puts the old one back on drop, so a failing test still lets

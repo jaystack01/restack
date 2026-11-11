@@ -1,6 +1,6 @@
 use crate::db::{
-    get_full_library, get_media_paths, init_schema, open_db, sync_missing_media, upsert_episode,
-    upsert_movie, upsert_other,
+    begin_write, get_full_library, get_media_paths, init_schema, open_db, sync_missing_media,
+    upsert_episode, upsert_movie, upsert_other,
 };
 use crate::models::{AppState, LibraryResponse, ScanGuard};
 use crate::run_blocking;
@@ -188,8 +188,7 @@ impl<'c> UpsertBatch<'c> {
             None => {
                 self.opened_at = Instant::now();
                 self.rows = 0;
-                self.conn
-                    .unchecked_transaction()
+                begin_write(self.conn)
                     .map_err(|e| format!("Failed to start scan transaction: {e}"))?
             }
         };
@@ -517,6 +516,49 @@ mod tests {
         })
         .unwrap();
         assert_eq!(probes, 40);
+    }
+
+    #[test]
+    fn scan_batch_waits_for_a_concurrent_writer() {
+        let tmp = TempDir::new("sync-busy");
+        let db_path = tmp.path("restack.db");
+        let conn = Connection::open(&db_path).unwrap();
+        conn.busy_timeout(Duration::from_secs(5)).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        init_schema(&conn).unwrap();
+        for n in 1..=5 {
+            tmp.file(&format!("Show/Show.S01E{n:02}.mkv"));
+        }
+        scan(&conn, &[tmp.path("Show")]);
+
+        // Another connection (the mpv tracker, a UI command) holds the write lock when the
+        // rescan opens its batch. Each upsert reads before it writes: in a deferred batch
+        // that fails at once with SQLITE_BUSY and the file is skipped; IMMEDIATE waits.
+        let (locked_tx, locked) = std::sync::mpsc::channel();
+        let other_path = db_path.clone();
+        let other = std::thread::spawn(move || {
+            let other = Connection::open(other_path).unwrap();
+            other
+                .execute_batch(
+                    "BEGIN IMMEDIATE;
+                     INSERT OR REPLACE INTO app_state (key, value_text) VALUES ('other', 'x');",
+                )
+                .unwrap();
+            locked_tx.send(()).unwrap();
+            std::thread::sleep(Duration::from_millis(200));
+            other.execute_batch("COMMIT").unwrap();
+        });
+        locked.recv().unwrap();
+        let walk = collect_video_files(&[tmp.path("Show")]);
+        sync_library(&conn, &walk, |_, _, _| (999, None)).unwrap();
+        other.join().unwrap();
+
+        let rewritten: i64 = conn
+            .query_row("SELECT COUNT(*) FROM media WHERE duration = 999", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rewritten, 5, "no file was skipped as busy");
     }
 
     /// Make every write to a media row whose file name starts with `Bad.` fail, the way a

@@ -185,11 +185,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** If the mutex is ever poisoned (a panic while it is held), `.lock().ok()` yields `None`: the old mpv is not killed, and the new `Child` is dropped without being stored, so it keeps running untracked and is never reaped.
   - **Solution:** Use `lock().unwrap_or_else(|e| e.into_inner())` so the swap still happens on a poisoned lock.
 
-- [ ] **BUG-47 · Medium · Potential** — Deferred read-then-write transactions fail at once with `SQLITE_BUSY_SNAPSHOT` in WAL.
-  - **Location:** `src-tauri/src/commands/scanner.rs` (`UpsertBatch`, `unchecked_transaction`); `src-tauri/src/db.rs` `migrate_existing_groups`, `merge_groups`, `move_episodes`, `reclassify_media`, `set_watched`, `sync_missing_media` (all `unchecked_transaction`)
-  - **Problem:** Since PERF-15 the DB runs in WAL. These transactions are deferred: they start as readers and upgrade to writers on their first write. In WAL, if another connection committed between the read and the upgrade, SQLite returns `SQLITE_BUSY_SNAPSHOT` immediately, without waiting for the busy timeout. Example: a merge or reclassify that reads groups while a scan batch commits.
-  - **Solution:** Begin read-then-write transactions with `TransactionBehavior::Immediate` (`Transaction::new_unchecked(conn, TransactionBehavior::Immediate)`), so the write lock is taken up front and the busy timeout applies.
-
 ## 🔐 Security and Data Integrity
 
 
@@ -365,6 +360,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-47**: read-then-write transactions (scan `UpsertBatch`, migrate/merge/move/reclassify/set_watched/sync_missing_media) begin IMMEDIATE via `db::begin_write`, so under WAL they wait for the write lock instead of failing with SQLITE_BUSY(_SNAPSHOT). Tested with two connections on a temp WAL DB.
 - [x] 2026-11-11 **BUG-23**: Undo timer lives in a ref, cleared before each new batch, on Undo and on unmount. Note: Undo still covers only the last batch (by design for now).
 - [x] 2026-11-11 **SEC-4**: mpv gets the file after a `--` separator, and `delete_episodes_cmd`/`restore_episodes_cmd` take media ids resolved by `db::resolve_trash_paths`: live rows only for delete (`deleted_at IS NULL AND missing_since IS NULL`), trashed rows only for restore, and the whole batch is rejected before any Trash move if an id is unknown or ineligible.
 - [x] 2026-11-11 **PERF-15**: `open_db` calls `configure_connection`: explicit 5 s `BUSY_TIMEOUT` and `journal_mode=WAL` (persistent; old DBs convert on first open; a failed switch on a read-only DB is logged, not fatal). Tested on temp-file DBs. Follow-up: BUG-47.
