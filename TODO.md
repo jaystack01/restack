@@ -104,18 +104,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed or timed-out ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
   - **Solution:** Seek to `min(15, duration * 0.1)` (duration is known first). Regenerate when `thumbnail_path IS NULL`, the file at `thumbnail_path` no longer exists, or `duration = 0`, not only for new files.
 
-- [ ] **BUG-20 · Medium · Confirmed** — The scanner walks hidden dirs and misses udisks2 mounts.
-  - **Location:** `src-tauri/src/utils/scanner.rs:45-51` (`should_skip_dir`), `:53-96` (`discover_default_scan_roots`)
-  - **Problem:** (`.Trash-*` dirs are skipped since 2026-11-01; what remains:)
-    1. Other hidden dirs (`~/.var`, `~/.local/share/Steam`, …) are still walked.
-    2. On Arch/Fedora (including this CachyOS machine), udisks2 mounts removable drives at `/run/media/$USER`, which isn't a root, so they're never scanned.
-    3. `/media/<name>` uses the basename of `$HOME` instead of the actual username.
-  - **Solution:** Skip hidden dirs generally (with an allowlist if needed). Add `/run/media/$USER`. Get the username from `$USER` / `users::get_current_username`.
-
 - [ ] **BUG-21 · Low · Confirmed** — Skip-dir matches by name anywhere in the tree.
   - **Location:** `src-tauri/src/utils/scanner.rs:50`
   - **Problem:** A user folder called `dist` or `target` (e.g. `~/Videos/target/`) is silently skipped.
   - **Solution:** Match `target`/`dist`/`node_modules` only when the parent contains `Cargo.toml`/`package.json`, or make the exclusion list user-configurable (FEAT-1).
+  - **Since 2026-11-11 (BUG-20):** the matching is centralised in `skip_kind()`, and rows already indexed under a skipped `target`/`dist` dir are kept (excluded from reconciliation via `ScanWalk.skipped_dirs`), so changing the rule is data-safe.
 
 - [ ] **BUG-23 · Low · Confirmed** — A second delete within 10 s makes the Undo banner disappear early.
   - **Location:** `src/pages/SeriesDetail.jsx:372-373`
@@ -190,6 +183,16 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** The page's Enter shortcut calls `preventDefault` whenever an episode is focused, even when keyboard focus is on a button (e.g. the selection bar's Delete button, where focus returns after the delete dialog closes). Enter then plays the episode and the button never activates.
   - **Solution:** Skip the Enter (and Space, if added) shortcut when `e.target` is a `button`, `a`, or other interactive element.
 
+- [ ] **BUG-44 · Low · Improvement** — Rows under skipped dirs are never reconciled.
+  - **Location:** `src-tauri/src/utils/scanner.rs` (`reconcile_unseen`, `ScanWalk.skipped_dirs`)
+  - **Problem:** Since BUG-20, hidden and build dirs are skipped and rows under them are left untouched so nothing indexed there is lost. But rows that older builds indexed inside hidden dirs then stay visible forever, even after their files are deleted, and fail to play.
+  - **Solution:** Purge them together with BUG-35, hide rows whose files no longer exist, or add a hidden-dir allowlist (FEAT-1).
+
+- [ ] **BUG-45 · Low · Potential** — Hidden entries in `/mnt` become scan roots.
+  - **Location:** `src-tauri/src/utils/scanner.rs` (`discover_default_scan_roots`)
+  - **Problem:** Every dir directly in `/mnt` becomes a root, including hidden ones like `/mnt/.snapshots`, and roots are walked fully (skip rules only apply below a root).
+  - **Solution:** Skip hidden entries when listing `/mnt`.
+
 ## 🔐 Security and Data Integrity
 
 
@@ -213,9 +216,10 @@ _Nothing picked yet. Move items here when you start them._
 ## ⚡ Performance
 
 - [ ] **PERF-2 · Medium · Confirmed** — The default scan walks **all of `$HOME`**.
-  - **Location:** `src-tauri/src/utils/scanner.rs:53-80`
-  - **Problem:** That includes `~/.local/share/Steam`, `~/.var`, browser profiles, and so on.
-  - **Solution:** User-configurable scan roots (FEAT-1). Until then consider `~/Videos`, `~/Downloads`, `~/Movies`, and skip hidden dirs (BUG-20).
+  - **Location:** `src-tauri/src/utils/scanner.rs` (`discover_default_scan_roots`)
+  - **Problem:** Hidden dirs below a root (`~/.local/share/Steam`, `~/.var`, browser profiles, caches) are skipped since BUG-20 (2026-11-11). What remains is large non-hidden trees under `$HOME` (game libraries, source checkouts, photo archives), which are still walked on every scan.
+  - **Decision (maintainer, 2026-11-11):** keep walking all of `$HOME` until FEAT-1; don't narrow the default roots.
+  - **Solution:** User-configurable scan roots and exclusions (FEAT-1).
 
 - [ ] **PERF-3 · Medium · Improvement** — Thumbnail and duration generation is serial.
   - **Location:** `src-tauri/src/commands/scanner.rs:66-71` (probe closure)
@@ -378,6 +382,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-20**: Walk skips hidden dirs below a root (a hidden root is still walked); `/run/media/<user>` added to default roots; user name from `$USER`/`$LOGNAME` before the `$HOME` basename. Skipped non-trash subtrees (`ScanWalk.skipped_dirs`) are excluded from reconciliation, so rows indexed there earlier are left untouched. Follow-ups: BUG-44, BUG-45.
 - [x] 2026-11-11 **SEC-7, DEP-2**: removed the unused dialog and opener plugins: their Rust crates and `.plugin(...)` calls in `lib.rs`, the `@tauri-apps/plugin-dialog`/`plugin-opener` npm packages, and the `opener:default`/`dialog:default` capability permissions; both lockfiles updated. FEAT-1 re-adds the dialog with a narrow permission.
 - [x] 2026-11-11 **SEC-6**: Asset-protocol scope is `$APPDATA/thumbnails/**`, which Tauri resolves through `app_data_dir()` like `utils/thumbnail.rs`, so thumbnails work under a custom `$XDG_DATA_HOME` and the identifier is no longer duplicated.
 - [x] 2026-11-05 **BUG-41**: the end of every scan re-keys shows renamed by parser fixes **in place** (`rekey_renamed_shows`, in a savepoint so its errors never fail the scan): same id and route, the old key becomes an alias, a user rename is kept. A group that already owns the new name is absorbed only if it holds just that show's own newer episodes. Two distinct existing shows are never merged automatically (maintainer decision); see BUG-39 for what's left.

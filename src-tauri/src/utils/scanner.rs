@@ -111,23 +111,66 @@ pub fn get_duration(file_path: &str) -> Result<i64, String> {
     Err("Duration not found in ffprobe output".to_string())
 }
 
-pub fn should_skip_dir(path: &Path) -> bool {
-    let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
-        return false;
-    };
+/// Why the walk leaves a directory out.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SkipKind {
+    /// Trash (`Trash`, `.Trash-<uid>` on non-home drives): never media. Rows under
+    /// it stay subject to reconciliation, so files indexed there by older builds
+    /// are cleaned up once they leave the trash.
+    Trash,
+    /// Hidden dirs and build/tool dirs: their contents are simply not scanned.
+    /// Rows already indexed under them are left exactly as they are.
+    Excluded,
+}
 
+/// Whether the walk skips a directory named `name` below a scan root.
+pub fn skip_kind(name: &str) -> Option<SkipKind> {
     // `.Trash-<uid>` is the freedesktop trash on non-home drives
-    matches!(
-        name,
-        ".cache" | ".git" | "node_modules" | "target" | "dist" | "Trash"
-    ) || name.starts_with(".Trash-")
+    if name == "Trash" || name.starts_with(".Trash-") {
+        return Some(SkipKind::Trash);
+    }
+    // Hidden dirs cover `.cache`, `.git`, `.local/share/Steam`, `.var`, browser
+    // profiles... (BUG-20). `node_modules`/`target`/`dist` are matched anywhere (BUG-21).
+    if name.starts_with('.') || matches!(name, "node_modules" | "target" | "dist") {
+        return Some(SkipKind::Excluded);
+    }
+    None
+}
+
+/// The login name, used for the removable-media roots. `$HOME`'s basename is only
+/// a last resort: home dirs don't have to be named after the user.
+pub fn current_username(
+    user: Option<String>,
+    logname: Option<String>,
+    home: Option<String>,
+) -> Option<String> {
+    let valid = |name: &str| !name.is_empty() && !name.contains('/') && name != "." && name != "..";
+    user.filter(|u| valid(u))
+        .or_else(|| logname.filter(|l| valid(l)))
+        .or_else(|| {
+            home.as_deref()
+                .and_then(|h| Path::new(h).file_name())
+                .and_then(|n| n.to_str())
+                .filter(|n| valid(n))
+                .map(str::to_string)
+        })
+}
+
+/// Per-user mount dirs for removable drives: `/media/<user>` (Debian/Ubuntu) and
+/// `/run/media/<user>` (udisks2 on Arch/Fedora).
+pub fn removable_media_dirs(user: &str) -> [PathBuf; 2] {
+    [
+        Path::new("/media").join(user),
+        Path::new("/run/media").join(user),
+    ]
 }
 
 pub fn discover_default_scan_roots() -> Vec<String> {
     let mut roots = BTreeSet::new();
+    let home = env::var("HOME").ok();
 
-    if let Ok(home) = env::var("HOME") {
-        let home_path = Path::new(&home);
+    if let Some(home) = &home {
+        let home_path = Path::new(home);
 
         if home_path.exists() && home_path.is_dir() {
             roots.insert(home.clone());
@@ -139,16 +182,13 @@ pub fn discover_default_scan_roots() -> Vec<String> {
         //         roots.insert(path.to_string_lossy().to_string());
         //     }
         // }
+    }
 
-        let media_user = Path::new("/media").join(
-            home_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or_default(),
-        );
-
-        if media_user.exists() && media_user.is_dir() {
-            roots.insert(media_user.to_string_lossy().to_string());
+    if let Some(user) = current_username(env::var("USER").ok(), env::var("LOGNAME").ok(), home) {
+        for dir in removable_media_dirs(&user) {
+            if dir.is_dir() {
+                roots.insert(dir.to_string_lossy().to_string());
+            }
         }
     }
 
@@ -175,6 +215,9 @@ pub struct ScanWalk {
     pub walked_roots: Vec<PathBuf>,
     /// Paths that couldn't be read (permissions, I/O errors), so their contents are unknown.
     pub incomplete_dirs: Vec<PathBuf>,
+    /// Dirs left out on purpose (`SkipKind::Excluded`). Their contents weren't looked
+    /// at, so rows under them are kept as they are, like rows under `incomplete_dirs`.
+    pub skipped_dirs: Vec<PathBuf>,
 }
 
 pub fn collect_video_files(roots: &[String]) -> ScanWalk {
@@ -182,6 +225,7 @@ pub fn collect_video_files(roots: &[String]) -> ScanWalk {
         files: Vec::new(),
         walked_roots: Vec::new(),
         incomplete_dirs: Vec::new(),
+        skipped_dirs: Vec::new(),
     };
     for root in roots {
         let root_path = Path::new(root);
@@ -189,9 +233,21 @@ pub fn collect_video_files(roots: &[String]) -> ScanWalk {
             continue;
         }
         walk.walked_roots.push(root_path.to_path_buf());
-        let iter = WalkDir::new(root_path)
-            .into_iter()
-            .filter_entry(|entry| !should_skip_dir(entry.path()));
+        let skipped = &mut walk.skipped_dirs;
+        let iter = WalkDir::new(root_path).into_iter().filter_entry(|entry| {
+            // A root is walked even if its own name matches (e.g. a hidden folder
+            // the user chose); only what's below it is skipped.
+            if entry.depth() == 0 || !entry.file_type().is_dir() {
+                return true;
+            }
+            let Some(kind) = entry.file_name().to_str().and_then(skip_kind) else {
+                return true;
+            };
+            if kind == SkipKind::Excluded {
+                skipped.push(entry.path().to_path_buf());
+            }
+            false
+        });
 
         for entry in iter {
             let entry = match entry {
@@ -213,7 +269,8 @@ pub fn collect_video_files(roots: &[String]) -> ScanWalk {
 
 /// Decide what happens to DB rows whose files weren't seen this scan.
 /// Returns `(removed, missing)`: rows to hard-delete and rows to hide.
-/// Only rows under a walked root, and outside any unreadable subtree, are touched.
+/// Only rows under a walked root, and outside any unreadable or skipped subtree,
+/// are touched.
 pub fn reconcile_unseen(
     existing: &HashMap<String, bool>,
     seen: &HashSet<String>,
@@ -229,7 +286,11 @@ pub fn reconcile_unseen(
         }
         let path = Path::new(old_file);
         let in_scope = walk.walked_roots.iter().any(|root| path.starts_with(root))
-            && !walk.incomplete_dirs.iter().any(|dir| path.starts_with(dir));
+            && !walk
+                .incomplete_dirs
+                .iter()
+                .chain(&walk.skipped_dirs)
+                .any(|dir| path.starts_with(dir));
         if !in_scope {
             continue;
         }
@@ -290,6 +351,7 @@ pub(crate) mod tests {
             files: Vec::new(),
             walked_roots: roots.iter().map(PathBuf::from).collect(),
             incomplete_dirs: incomplete.iter().map(PathBuf::from).collect(),
+            skipped_dirs: Vec::new(),
         }
     }
 
@@ -394,6 +456,95 @@ pub(crate) mod tests {
 
         assert!(walk.files.is_empty());
         assert_eq!(walk.incomplete_dirs, vec![locked]);
+    }
+
+    #[test]
+    fn collect_skips_hidden_dirs_below_the_root_only() {
+        let tmp = TempDir::new("hidden");
+        let keep = tmp.file("Videos/a.mkv");
+        tmp.file(".local/share/Steam/b.mkv");
+        tmp.file("Videos/.thumbs/c.mkv");
+        tmp.file(".var/app/d.mp4");
+        let hidden_root = tmp.file(".chosen/e.mkv");
+
+        let mut walk = collect_video_files(&[tmp.path("")]);
+        assert_eq!(walk.files, vec![keep]);
+        walk.skipped_dirs.sort();
+        assert_eq!(
+            walk.skipped_dirs,
+            [".chosen", ".local", ".var", "Videos/.thumbs"]
+                .map(|d| tmp.0.join(d))
+                .to_vec()
+        );
+
+        // A hidden folder passed as a root is still walked
+        let walk = collect_video_files(&[tmp.path(".chosen")]);
+        assert_eq!(walk.files, vec![hidden_root]);
+        assert!(walk.skipped_dirs.is_empty());
+    }
+
+    #[test]
+    fn collect_does_not_protect_trash_dirs() {
+        let tmp = TempDir::new("trash-kind");
+        tmp.file("disk/.Trash-1000/files/a.mkv");
+        tmp.file("disk/Trash/files/b.mkv");
+        let walk = collect_video_files(&[tmp.path("disk")]);
+        assert!(walk.files.is_empty());
+        assert!(walk.skipped_dirs.is_empty());
+    }
+
+    #[test]
+    fn reconcile_leaves_rows_under_skipped_hidden_dirs_untouched() {
+        let tmp = TempDir::new("hidden-reconcile");
+        // Indexed by an older build that walked hidden dirs. The folder still exists
+        // and has other content, which would otherwise mean "really removed".
+        let hidden = tmp.file(".hidden/x.mkv");
+        tmp.file(".hidden/notes.txt");
+        let hidden_gone = tmp.path(".hidden/deleted.mkv");
+        // Indexed from a drive's trash by an older build: still cleaned up
+        let trashed = tmp.path("disk/.Trash-1000/files/old.mkv");
+        tmp.file("disk/.Trash-1000/files/other.mkv");
+        let removed_file = tmp.path("Videos/removed.mkv");
+        let seen_file = tmp.file("Videos/kept.mkv");
+
+        let walk = collect_video_files(&[tmp.path("")]);
+        assert_eq!(walk.files, vec![seen_file.clone()]);
+        let rows = existing(&[
+            (&hidden, false),
+            (&hidden_gone, false),
+            (&trashed, false),
+            (&removed_file, false),
+            (&seen_file, false),
+        ]);
+        let seen: HashSet<String> = walk.files.iter().cloned().collect();
+        let (removed, missing) = reconcile_unseen(&rows, &seen, &walk, is_confirmed_gone);
+
+        let mut want = vec![removed_file, trashed];
+        want.sort();
+        assert_eq!(removed, want);
+        assert!(missing.is_empty());
+    }
+
+    #[test]
+    fn username_prefers_user_then_logname_then_home() {
+        let s = |v: &str| Some(v.to_string());
+        assert_eq!(
+            current_username(s("jay"), s("other"), s("/home/data")),
+            s("jay")
+        );
+        assert_eq!(current_username(None, s("jay"), s("/home/data")), s("jay"));
+        assert_eq!(current_username(s(""), s(""), s("/home/jay")), s("jay"));
+        assert_eq!(current_username(s("a/b"), None, s("/home/jay/")), s("jay"));
+        assert_eq!(current_username(None, None, s("/")), None);
+        assert_eq!(current_username(None, None, None), None);
+    }
+
+    #[test]
+    fn removable_media_dirs_include_udisks2_mounts() {
+        assert_eq!(
+            removable_media_dirs("jay"),
+            [PathBuf::from("/media/jay"), PathBuf::from("/run/media/jay")]
+        );
     }
 
     #[test]
