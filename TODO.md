@@ -85,9 +85,9 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Use named `const`s at module top (Rust) or a `src/config.js`, and later the settings table.
 
 - [ ] **DES-8 · Low · Confirmed** — Selection identity is mixed (file path vs id).
-  - **Location:** `src/pages/SeriesDetail.jsx:38` (Set of `filePath`), drag payloads use `id` (`EpisodeGrid.jsx:27-29`), move uses ids (`:346`), delete/restore use paths (`:358`)
-  - **Problem:** Two keys for the same entity make bugs like BUG-8 more likely and complicate a future id-based backend.
-  - **Solution:** Key selection by `id` and map to paths only at the delete/restore call.
+  - **Location:** `src/pages/SeriesDetail.jsx` (`selectedEpisodes`, a Set of `filePath`), drag payloads use `id` (`EpisodeGrid.jsx`), move uses ids; delete/restore take ids since SEC-4 (2026-11-11) and are mapped from the path-keyed selection in `deleteSelectedEpisodes`
+  - **Problem:** Two keys for the same entity make bugs like BUG-8 more likely.
+  - **Solution:** Key selection by `id` throughout (the backend is now id-based for every mutation).
 
 ## 🐛 Bugs and Logical Errors
 
@@ -199,12 +199,6 @@ _Nothing picked yet. Move items here when you start them._
 
 
 
-
-- [ ] **SEC-4 · Medium · Potential** — Destructive commands trust arbitrary paths from the webview.
-  - **Location:** `src-tauri/src/commands/library.rs` (`delete_episodes_cmd`, `restore_episodes_cmd`)
-  - **Problem:** Any string sent from JS is trashed or restored. The CSP is strict and there's no remote content, so exploitation needs an XSS first. But this is the app's only file-destroying path and it does no validation.
-  - **Done 2026-11-11 (mpv half):** `play_episode` builds its arguments with the pure `mpv_args`, which puts the file last after a `--` separator, so a path can never be parsed as an mpv option.
-  - **Solution (remaining):** Have delete/restore accept `media_ids`, resolve paths from the DB, and refuse anything not in `media`.
 
 - [ ] **SEC-8 · Low · Potential** — Non-UTF-8 paths are stored lossily.
   - **Location:** `src-tauri/src/utils/scanner.rs` (`collect_video_files`, where stored paths are built), `commands/scanner.rs:52-54` (progress file name, `to_string_lossy`)
@@ -375,6 +369,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **SEC-4**: mpv gets the file after a `--` separator, and `delete_episodes_cmd`/`restore_episodes_cmd` take media ids resolved by `db::resolve_trash_paths`: live rows only for delete (`deleted_at IS NULL AND missing_since IS NULL`), trashed rows only for restore, and the whole batch is rejected before any Trash move if an id is unknown or ineligible.
 - [x] 2026-11-11 **PERF-15**: `open_db` calls `configure_connection`: explicit 5 s `BUSY_TIMEOUT` and `journal_mode=WAL` (persistent; old DBs convert on first open; a failed switch on a read-only DB is logged, not fatal). Tested on temp-file DBs. Follow-up: BUG-47.
 - [x] 2026-11-11 **BUG-28**: `video_playback_started`/`video_playback_stopped` carry `{ file_path, session }`, and the store clears Playing only when the stop's session matches the current one (`clearPlayingSession`), so a replaced mpv's late stop no longer clears a replay of the same file.
 - [x] 2026-11-11 **BUG-30**: each playback gets a session id (`next_playback_session`), `AppState.player_process` stores `PlayerSession { session, child }`, and the tracker's `reap_session` `try_wait`s only its own session's mpv after the post-loop events and clears the slot once it exited, so no zombie lingers and a newer mpv is never touched. Follow-up: BUG-46.

@@ -59,7 +59,7 @@ export default function SeriesDetail() {
   const [collapsedSeasons, setCollapsedSeasons] = useState({});
   const [recentlyDeleted, setRecentlyDeleted] = useState(null);
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
-  const [pendingDeletePaths, setPendingDeletePaths] = useState([]);
+  const [pendingDeleteEpisodes, setPendingDeleteEpisodes] = useState([]);
   const [renamingGroupId, setRenamingGroupId] = useState(null);
   const [renameValue, setRenameValue] = useState("");
   const [focusedEpisodeId, setFocusedEpisodeId] = useState(null);
@@ -370,25 +370,26 @@ export default function SeriesDetail() {
 
   async function deleteSelectedEpisodes() {
     // Only ever trash episodes that belong to the series on screen
-    const filePaths =
+    const episodes =
       selectedGroupData?.episodes
         .filter((ep) => selectedEpisodes.has(ep.filePath))
-        .map((ep) => ep.filePath) || [];
-    if (!filePaths.length) return;
-    setPendingDeletePaths(filePaths);
+        .map((ep) => ({ id: ep.id, filePath: ep.filePath })) || [];
+    if (!episodes.length) return;
+    setPendingDeleteEpisodes(episodes);
     setDeleteConfirmOpen(true);
   }
 
   async function confirmDelete() {
     setDeleteConfirmOpen(false);
-    const filePaths = pendingDeletePaths;
-    setPendingDeletePaths([]);
+    // The backend resolves paths from ids, so only library rows can be trashed
+    const mediaIds = pendingDeleteEpisodes.map((ep) => ep.id);
+    setPendingDeleteEpisodes([]);
     try {
-      await deleteEpisodes(filePaths);
+      await deleteEpisodes(mediaIds);
       await fetchLibrary(false);
       setSelectedEpisodes(new Set());
       const timeoutId = setTimeout(() => setRecentlyDeleted(null), 10000);
-      setRecentlyDeleted({ filePaths, timeoutId });
+      setRecentlyDeleted({ mediaIds, timeoutId });
     } catch {
       setError("Failed to delete episodes.");
     }
@@ -397,7 +398,7 @@ export default function SeriesDetail() {
   async function undoDelete() {
     if (!recentlyDeleted) return;
     try {
-      await restoreEpisodes(recentlyDeleted.filePaths);
+      await restoreEpisodes(recentlyDeleted.mediaIds);
       await fetchLibrary(false);
       clearTimeout(recentlyDeleted.timeoutId);
       setRecentlyDeleted(null);
@@ -528,7 +529,7 @@ export default function SeriesDetail() {
           <div className="flex items-center gap-2">
             <Info className="w-4 h-4 text-accent shrink-0" />
             <span>
-              {recentlyDeleted.filePaths.length} episode(s) moved to Trash.
+              {recentlyDeleted.mediaIds.length} episode(s) moved to Trash.
             </span>
           </div>
           <Button
@@ -775,15 +776,15 @@ export default function SeriesDetail() {
         <p className="text-zinc-400 text-sm mb-6 leading-relaxed select-none">
           Are you sure you want to delete{" "}
           <span className="text-white font-semibold">
-            {pendingDeletePaths.length}
+            {pendingDeleteEpisodes.length}
           </span>{" "}
           selected episode(s)? They will be relocated to your operating system's
           Trash container.
         </p>
         <ul className="max-h-40 overflow-y-auto mb-6 -mt-3 space-y-1 text-xs text-zinc-300 select-none">
-          {pendingDeletePaths.map((path) => (
-            <li key={path} className="truncate" title={path}>
-              {getFileName(path)}
+          {pendingDeleteEpisodes.map(({ filePath }) => (
+            <li key={filePath} className="truncate" title={filePath}>
+              {getFileName(filePath)}
             </li>
           ))}
         </ul>

@@ -72,22 +72,25 @@ export function getContinueWatching() {
 }
 
 /**
- * Move files to the Trash and soft-delete their rows. Rejects while a scan runs.
- * @param {string[]} filePaths
+ * Move live media files to the Trash and soft-delete their rows. The backend
+ * resolves paths from the ids and rejects the whole batch, before trashing
+ * anything, if any id is unknown or not live. Rejects while a scan runs.
+ * @param {number[]} mediaIds
  * @returns {Promise<void>}
  */
-export function deleteEpisodes(filePaths) {
-  return invoke("delete_episodes_cmd", { filePaths });
+export function deleteEpisodes(mediaIds) {
+  return invoke("delete_episodes_cmd", { mediaIds });
 }
 
 /**
- * Restore files from the Trash and clear their soft delete. Rejects while a
- * scan runs.
- * @param {string[]} filePaths
+ * Restore soft-deleted media files from the Trash and clear their soft
+ * delete. Rejects the whole batch if any id is unknown or not trashed, and
+ * while a scan runs.
+ * @param {number[]} mediaIds
  * @returns {Promise<void>}
  */
-export function restoreEpisodes(filePaths) {
-  return invoke("restore_episodes_cmd", { filePaths });
+export function restoreEpisodes(mediaIds) {
+  return invoke("restore_episodes_cmd", { mediaIds });
 }
 
 /**

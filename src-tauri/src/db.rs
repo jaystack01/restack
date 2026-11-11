@@ -1161,6 +1161,76 @@ pub fn mark_restored(conn: &Connection, file_path: &str) -> Result<(), String> {
     .map_err(|e| format!("Failed to mark episode as restored: {e}"))
 }
 
+/// A Trash operation requested by the frontend.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TrashAction {
+    /// Move live rows' files to the Trash.
+    Delete,
+    /// Bring soft-deleted rows' files back from the Trash.
+    Restore,
+}
+
+impl TrashAction {
+    pub fn verb(self) -> &'static str {
+        match self {
+            TrashAction::Delete => "delete",
+            TrashAction::Restore => "restore",
+        }
+    }
+}
+
+/// Resolve media ids to the file paths a Trash operation may touch, in request order with
+/// duplicates dropped. The webview only ever names ids, so nothing outside `media` can be
+/// trashed. Delete accepts live rows only, restore soft-deleted rows only; if any id is
+/// unknown or in the wrong state the whole request is refused before a file is moved.
+pub fn resolve_trash_paths(
+    conn: &Connection,
+    media_ids: &[i64],
+    action: TrashAction,
+) -> Result<Vec<String>, String> {
+    let sql = match action {
+        TrashAction::Delete => {
+            "SELECT file_path FROM media
+             WHERE id = ?1 AND deleted_at IS NULL AND missing_since IS NULL"
+        }
+        TrashAction::Restore => {
+            "SELECT file_path FROM media WHERE id = ?1 AND deleted_at IS NOT NULL"
+        }
+    };
+    let verb = action.verb();
+    let mut stmt = conn
+        .prepare(sql)
+        .map_err(|e| format!("Failed to prepare {verb} lookup: {e}"))?;
+
+    let mut seen = HashSet::new();
+    let mut paths = Vec::new();
+    let mut rejected = Vec::new();
+    for &id in media_ids {
+        if !seen.insert(id) {
+            continue;
+        }
+        let path: Option<String> = stmt
+            .query_row(params![id], |r| r.get(0))
+            .optional()
+            .map_err(|e| format!("Failed to look up media {id}: {e}"))?;
+        match path {
+            Some(p) => paths.push(p),
+            None => rejected.push(id),
+        }
+    }
+
+    if !rejected.is_empty() {
+        let state = match action {
+            TrashAction::Delete => "in the library",
+            TrashAction::Restore => "in the Trash",
+        };
+        return Err(format!(
+            "Failed to {verb}: media {rejected:?} not found or not {state}"
+        ));
+    }
+    Ok(paths)
+}
+
 // ---------------------------------------------------------------------------
 // Scan sync helpers
 // ---------------------------------------------------------------------------
@@ -1662,6 +1732,41 @@ mod tests {
             get_media_paths(&conn).unwrap(),
             vec![("/v/a.s01e01.mkv".to_string(), false)]
         );
+    }
+
+    #[test]
+    fn trash_paths_resolve_only_eligible_rows() {
+        let conn = test_db();
+        upsert_episode(&conn, "/v/a.s01e01.mkv", &ep("A", 1, 1), 0, None).unwrap();
+        upsert_episode(&conn, "/v/a.s01e02.mkv", &ep("A", 1, 2), 0, None).unwrap();
+        upsert_movie(&conn, "/v/film.2001.mkv", "Film", Some(2001), 0, None).unwrap();
+        let (e1, e2) = (
+            id_of(&conn, "/v/a.s01e01.mkv"),
+            id_of(&conn, "/v/a.s01e02.mkv"),
+        );
+        let film = id_of(&conn, "/v/film.2001.mkv");
+
+        assert_eq!(
+            resolve_trash_paths(&conn, &[film, e1, film], TrashAction::Delete).unwrap(),
+            vec!["/v/film.2001.mkv", "/v/a.s01e01.mkv"]
+        );
+        assert_eq!(
+            resolve_trash_paths(&conn, &[], TrashAction::Delete).unwrap(),
+            Vec::<String>::new()
+        );
+        assert!(resolve_trash_paths(&conn, &[e1, -1], TrashAction::Delete).is_err());
+        assert!(resolve_trash_paths(&conn, &[e1], TrashAction::Restore).is_err());
+
+        mark_deleted(&conn, "/v/a.s01e01.mkv").unwrap();
+        assert!(resolve_trash_paths(&conn, &[e1], TrashAction::Delete).is_err());
+        assert_eq!(
+            resolve_trash_paths(&conn, &[e1], TrashAction::Restore).unwrap(),
+            vec!["/v/a.s01e01.mkv"]
+        );
+
+        // Hidden rows whose storage is offline can't be trashed
+        sync_missing_media(&conn, &[], &["/v/a.s01e02.mkv".into()]).unwrap();
+        assert!(resolve_trash_paths(&conn, &[e2], TrashAction::Delete).is_err());
     }
 
     #[test]
