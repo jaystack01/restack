@@ -127,13 +127,15 @@ src/
   layouts/MainLayout.jsx     Shell: Sidebar + main + TopSyncBar + FirstScanOverlay
   layouts/Sidebar.jsx        Nav, series list, drag-and-drop reclassify targets
   pages/Dashboard.jsx        Continue Watching / Up Next
-  pages/SeriesIndex.jsx      Grid of all series
-  pages/SeriesDetail.jsx     Largest page (~720 lines): seasons, grid/list, multi-select,
-                             mark watched, move, delete/undo, rename, merge suggestions
+  pages/SeriesIndex.jsx      Grid of all series + MergeSuggestionBanner
+  pages/SeriesDetail.jsx     Largest page (~880 lines): seasons, grid/list, multi-select,
+                             mark watched, move, delete/undo, inline rename, actions menu
+                             (rename/merge dialogs)
   pages/MoviesPage.jsx       Movies grid
   pages/OthersPage.jsx       Unclassified files
-  components/library/*       Domain components (ShowCard, EpisodeGrid/List, modals, banners…)
-  components/ui/*            Primitives (Button, Checkbox, Input, Modal, Select, Tab, FirstScanOverlay)
+  components/library/*       Domain components (EpisodeGrid/List, GroupActionsMenu, RenameGroupModal,
+                             MergeGroupModal, MergeSuggestionBanner, other modals and banners…)
+  components/ui/*            Primitives (Button, Checkbox, Input, Modal, Select, FirstScanOverlay)
   utils/cn.js                clsx + tailwind-merge
 
 src-tauri/src/
@@ -317,7 +319,7 @@ Episode/movie/other cards set `dataTransfer` `text/plain` to `JSON.stringify({ m
 - **Styling**: Tailwind v4 via `@tailwindcss/vite` (no `tailwind.config.js`). Use the tokens in `index.css` `@theme` (`bg-bg`, `bg-surface`, `bg-surface-card`, `text-text-secondary`, `text-accent`, `border-border`, `bg-progress`, `font-display`, …) over raw colors. Compose classes with `cn()`.
 - **Motion**: `framer-motion` (`motion`, `AnimatePresence`). **Icons**: `lucide-react`.
 - Dark-only UI, rounded cards, `select-none` app shell.
-- `components/ui/Modal` is an accessible dialog: `role=dialog`, focus trap, Escape closes it, and focus returns to the previous element on close. Mark the child that should get initial focus with `data-autofocus` (prefer Cancel for destructive confirms). Page-level `window` key handlers must ignore events while a dialog is open or whose target is inside `[role=dialog]`.
+- `components/ui/Modal` is an accessible dialog: `role=dialog`, focus trap, Escape closes it, and focus returns to the previous element on close. Mark the child that should get initial focus with `data-autofocus` (prefer Cancel for destructive confirms). Page-level `window` key handlers must ignore events while a dialog is open or whose target is inside `[role=dialog]`. A menu or popover inside a page that has `window` shortcuts must `stopPropagation` its own keydown (see `GroupActionsMenu`).
 - Thumbnails: always `convertFileSrc(thumbnailPath)`, and `draggable="false"` on `<img>`.
 
 ---
@@ -343,7 +345,7 @@ Check these before you assume a behaviour is intended. This list only covers sha
 `README.md` describes the MVP. The code has since grown:
 
 - The mpv IPC progress sync described as "advanced/optional" **is implemented**, along with auto-play of the next episode.
-- Added beyond the spec: `show_groups` with rename/merge/move/merge-suggestions, Movies/Others classification, drag-to-reclassify, soft delete to Trash with restore, Continue Watching/Up Next, first-scan overlay with live progress.
+- Added beyond the spec: `show_groups` with rename/merge/move/merge-suggestions (rename and merge from the SeriesDetail ⋯ menu, suggestions in a SeriesIndex banner), Movies/Others classification, drag-to-reclassify, soft delete to Trash with restore, Continue Watching/Up Next, first-scan overlay with live progress.
 - Thumbnail frame is at `min(15 s, 10% of duration)` (spec says 10s), and ffprobe is used for duration.
 
 Still backlog: subtitle management, optional TMDB metadata, multi-user profiles, watch-history analytics, user-configurable scan roots / settings page, incremental filesystem watching.

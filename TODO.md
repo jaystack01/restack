@@ -119,7 +119,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Use `season IS NULL`-style sentinel logic (or check `media_type != 'series'`) instead of `season == 0`. Detect collisions and append. Return an error on an unknown type (ARCH-7).
 
 - [ ] **BUG-33 · Low · Confirmed** — Undefined Tailwind classes silently do nothing.
-  - **Location:** `animate-in`/`fade-in`/`slide-in-from-top-2` (`SeriesDetail.jsx:484`, `MultiSelectBar.jsx:29`, `GroupActionsMenu.jsx:41`, `RenameGroupModal.jsx:42`, `MergeSuggestionBanner.jsx:23`) need the `tailwindcss-animate` plugin, which isn't installed. `bg-surface-2` (`RenameGroupModal.jsx:62`) isn't a theme token.
+  - **Location:** `animate-in` (`SeriesDetail.jsx:570`, `MultiSelectBar.jsx:29`) needs the `tailwindcss-animate` plugin, which isn't installed. (The MAINT-1 rewrite removed the other uses and `bg-surface-2`.)
   - **Solution:** Replace these with `framer-motion` (already used) or define the keyframes/tokens in `index.css`.
 
 - [ ] **BUG-34 · Low · Confirmed** — List-view hover styles never apply.
@@ -151,7 +151,7 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **BUG-43 · Low · Confirmed** — Enter on a focused page button plays the focused episode instead of pressing the button.
   - **Location:** `src/pages/SeriesDetail.jsx` (`onPageKeyDown`, the `enter` branch)
-  - **Problem:** The page's Enter shortcut calls `preventDefault` whenever an episode is focused, even when keyboard focus is on a button (e.g. the selection bar's Delete button, where focus returns after the delete dialog closes). Enter then plays the episode and the button never activates.
+  - **Problem:** The page's Enter shortcut calls `preventDefault` whenever an episode is focused, even when keyboard focus is on a page button (e.g. the selection bar's Delete button, where focus returns after the delete dialog closes). Enter then plays the episode and the button never activates. The header's ⋯ actions menu (`GroupActionsMenu`, MAINT-1) stops propagation of its keydown and isn't affected; the remaining page buttons are.
   - **Solution:** Skip the Enter (and Space, if added) shortcut when `e.target` is a `button`, `a`, or other interactive element.
 
 - [ ] **BUG-44 · Low · Improvement** — Rows under skipped dirs are never reconciled.
@@ -272,12 +272,6 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## 🧹 Maintainability and Technical Debt
 
-- [ ] **MAINT-1 · Medium · Confirmed** — About 600 lines of dead UI, and AGENT.md describes features that aren't reachable.
-  - **Location:** `src/components/library/{MergeSuggestionBanner,MergeGroupModal,RenameGroupModal,GroupTabs,GroupActionsMenu,ShowCard}.jsx`, `src/components/ui/Tab.jsx` (imported nowhere, or only by other dead files)
-  - **Problem:** Merge, merge suggestions, and the group picker exist in the backend (`merge_groups_cmd`, `get_merge_suggestions_cmd`, `get_all_groups_cmd`) but have **no entry point** in the UI. AGENT.md §3 lists "merge suggestions" as part of `SeriesDetail.jsx`.
-  - **Solution:** Decide per feature. Either wire `MergeSuggestionBanner` into `SeriesIndex` and the actions menu into the `SeriesDetail` header (BUG-13 and BUG-32 are fixed), or delete the files and the unused commands. Update AGENT.md either way.
-  - **Decision (maintainer, 2026-11-11):** wire the existing merge, rename, and merge-suggestion UI in (planned for the next wave) rather than deleting it.
-
 - [ ] **MAINT-2 · Low · Confirmed** — Small dead code paths.
   - **Location:** `src/pages/SeriesDetail.jsx:292-301` (`fetchLibrary(scan=true)` branch never used), `:130-133` (unreachable sort branch), `commands/scanner.rs:199-202` (`get_scan_roots` unused, keep for FEAT-1)
   - **Solution:** Remove these during the next touch of each file.
@@ -287,16 +281,26 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
   - **Problem:** `error` is never cleared, so one failure keeps the red banner up for the rest of the session. Messages drop the backend's string ("Failed to delete episodes." instead of the actual `Failed to trash file …`).
   - **Solution:** Auto-dismiss or clear on the next successful action, and include the backend message. Fold into FEAT-3.
 
-- [ ] **MAINT-4 · Low · Confirmed** — Docs drift between AGENT.md and this TODO.
-  - **Location:** `AGENT.md` §3 file map, §7 "Known issues"
-  - **Problem:** The known-issues list duplicates items here and will diverge.
-  - **Solution:** Keep AGENT.md §7 to *invariants and sharp edges an agent must know* and link here for the backlog. Update it when MAINT-1 lands (SEC-1, SEC-3, BUG-2, and PERF-6 already updated AGENT.md).
+- [ ] **MAINT-5 · Low · Improvement** — SeriesDetail has two rename paths.
+  - **Location:** `src/pages/SeriesDetail.jsx` (inline title rename, `fetchLibrary`; `GroupActionsMenu` → `RenameGroupModal`)
+  - **Problem:** Since MAINT-1 a series can be renamed both inline (click the title) and from the ⋯ menu dialog. The inline path still refreshes through the page's own `fetchLibrary` instead of `refreshLibrary`.
+  - **Solution:** Decide on one rename path and remove the other; route any remaining refresh through `refreshLibrary()` (see MAINT-2 for the dead `fetchLibrary(scan=true)` branch).
 
-- [ ] **CHORE-4 · Low · Improvement** — Split `pages/SeriesDetail.jsx` (724 lines).
+- [ ] **MAINT-6 · Low · Improvement** — The merge picker lists series with no live episodes.
+  - **Location:** `src/components/library/MergeGroupModal.jsx` (group list from `getAllGroups`), `src-tauri/src/db.rs` `get_all_groups`
+  - **Problem:** `get_all_groups` keeps groups whose rows are all trashed or missing (for Undo/remount), so the picker offers targets showing 0 episodes. Merging into one leaves the open series with no live rows and redirects to `/series`.
+  - **Solution:** Hide groups with 0 live episodes in `MergeGroupModal` (filter on the count), keeping the backend list unchanged.
+
+- [ ] **MAINT-7 · Low · Improvement** — Merge UI polish.
+  - **Location:** `src/components/library/MergeSuggestionBanner.jsx`, `GroupActionsMenu.jsx`, `MergeGroupModal.jsx`
+  - **Problem:** The banner keeps a merged pair until the suggestions refetch returns. `GroupActionsMenu` stays open when focus tabs away, and swallows page shortcuts while its trigger is focused. A `MergeGroupModal` load failure shows a generic message instead of the backend error.
+  - **Solution:** Drop the pair from the banner locally on merge success; close the menu on focus-out and only stop propagation of keys the menu handles; show the backend error (FEAT-3 `showError`).
+
+- [ ] **CHORE-4 · Low · Improvement** — Split `pages/SeriesDetail.jsx` (~880 lines).
   - **Solution:** Extract `useEpisodeSelection` (selection, range, keyboard), `useUndoDelete`, `SeasonSection`, and `SeriesHeader` (inline rename). BUG-8 and BUG-22 are done, so the move is now a pure refactor.
 
 - [ ] **CHORE-5 · Low · Confirmed** — Raw colors instead of `@theme` tokens.
-  - **Location:** 142 raw `zinc-*`/`red-*`/`amber-*`/hex usages across `src/`. Worst: `FirstScanOverlay.jsx`, `Sidebar.jsx`, `GroupTabs.jsx:58,71` (`#E0B0FF`), `index.css:56-62` (scrollbar)
+  - **Location:** 142 raw `zinc-*`/`red-*`/`amber-*`/hex usages across `src/`. Worst: `FirstScanOverlay.jsx`, `Sidebar.jsx`, `index.css:56-62` (scrollbar)
   - **Solution:** Add `--color-danger`, `--color-warning`, and muted-text tokens, then replace the raw values.
 
 - [ ] **CHORE-7 · Low · Improvement** — Rewrite `README.md` from the original spec into a real project README.
@@ -344,6 +348,8 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **MAINT-1**: merge/rename/suggestion UI wired in: SeriesIndex shows `MergeSuggestionBanner` (refetched when groups or counts change); the SeriesDetail header has `GroupActionsMenu` → `RenameGroupModal`/`MergeGroupModal` (on ui/Modal, Cancel focused for merge); merging away the open series navigates to the target. `GroupTabs`, `ShowCard`, `ui/Tab` deleted as unused. Follow-ups: MAINT-5, MAINT-6, MAINT-7.
+- [x] 2026-11-11 **MAINT-4**: AGENT.md §3 file map, §7 and §8 re-synced with the code after MAINT-1; §7 keeps only sharp edges and points to this file for the backlog.
 - [x] 2026-11-11 **BUG-45**: default roots from `/mnt` skip hidden entries (`mount_point_dirs`, temp-dir tested). Follow-up: BUG-49.
 - [x] 2026-11-11 **BUG-31**: the tracker retries the IPC connect every 200 ms until it succeeds or its own session's mpv is gone (exited or replaced), capped at 30 s (`socket_wait_step`/`wait_for_socket`); `try_clone` failure is logged instead of panicking; every exit path removes the socket and emits `video_playback_stopped {file_path, session}` (`end_session`) before `reap_session`.
 - [x] 2026-11-11 **BUG-46**: every `player_process` access goes through `lock_player` (recovers a poisoned mutex via `into_inner`), so the swaps and the tracker's reap always happen and no mpv is orphaned.
@@ -371,7 +377,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 - [x] 2026-11-05 **BUG-22**: `ui/Modal` is now an accessible dialog (`role=dialog`, `aria-modal`, initial focus on the `data-autofocus` child, Tab trap, Escape closes, focus restored on close). The SeriesDetail shortcuts ignore keys while the delete dialog is open or inside any `[role=dialog]`, so Enter presses the focused dialog button (Cancel by default) and Escape keeps the selection. Follow-up: BUG-43.
 - [x] 2026-11-05 **ARCH-2**: `player.rs` is split into a pure `parse_ipc_line` → `IpcEvent`, a pure `ProgressTracker` (injected time; returns persist/exit decisions), the `drive_ipc` loop, and `track_progress` I/O glue. Behaviour is unchanged, except that property-changes for unobserved property names are now ignored (unreachable: mpv only reports observed properties). `play_next_episode` is still emitted after the loop, from `TrackerExit::play_next`.
 - [x] 2026-11-05 **TEST-3**: 20 tests feed recorded mpv IPC lines (and read errors) through the real `drive_ipc` with a fake clock: 5 s throttle, wall-clock reset on pause, watched latch, eof → position 0 + play next only at exit, quit/error/stop flush, read-error stop.
-- [x] 2026-11-05 **ARCH-5**: `src/api.js` wraps every Tauri command (JSDoc'd, returns the `invoke` promise untouched) plus `refreshLibrary()`; every `invoke()` in `src/` now goes through it. Error handling and await order are unchanged, including the silent catches (FEAT-3). `scanAndSync`, `getScanRoots`, and `getMergeSuggestions` have no callers yet (FEAT-1, MAINT-1).
+- [x] 2026-11-05 **ARCH-5**: `src/api.js` wraps every Tauri command (JSDoc'd, returns the `invoke` promise untouched) plus `refreshLibrary()`; every `invoke()` in `src/` now goes through it. Error handling and await order are unchanged, including the silent catches (FEAT-3). `scanAndSync` and `getScanRoots` have no callers yet (FEAT-1); `getMergeSuggestions` is called by SeriesIndex since MAINT-1.
 - [x] 2026-11-05 **CHORE-3**: GitHub Actions CI (`.github/workflows/ci.yml`, ubuntu-24.04, Node 24, stable Rust) runs `npm ci`, `npm run lint`, `npm run format:check`, `npm run build`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --locked` on pushes to `develop`/`main` and on PRs. Add `vitest run` when TEST-4 lands.
 - [x] 2026-11-05 **CHORE-2**: Added ESLint 9 (flat config `eslint.config.js`: recommended + `react`, `react-hooks`, `no-shadow`) and Prettier 3 (default options, `.prettierignore` skips `src-tauri`, `dist` and Markdown). New scripts are `npm run lint`, `npm run format`, and `npm run format:check` (Prettier + `cargo fmt --check`). Fixed the 3 clippy warnings and removed unused imports. The whole tree was then reformatted in a separate style-only commit.
 - [x] 2026-11-05 **BUG-32**: `MergeGroupModal` imports `AlertCircle`, which it renders, instead of the unused `AlertTriangle`. ESLint caught it (`react/jsx-no-undef`).
