@@ -8,6 +8,22 @@ use tauri::{AppHandle, Manager};
 /// How long ffmpeg may take to grab one frame before the scan skips the thumbnail.
 pub const THUMBNAIL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Preferred thumbnail frame, past most cold opens and logos.
+const PREFERRED_SEEK_SECS: f64 = 15.0;
+/// Frame used when the duration is unknown (ffprobe failed): early enough to exist in
+/// short clips, late enough to skip a black first frame.
+const UNKNOWN_DURATION_SEEK_SECS: f64 = 1.0;
+
+/// Where to grab the thumbnail frame: 15 s in, or 10% of the way through a shorter clip
+/// (a fixed 15 s seek gives no frame at all for clips shorter than that).
+pub fn thumbnail_seek(duration_secs: i64) -> f64 {
+    if duration_secs > 0 {
+        PREFERRED_SEEK_SECS.min(duration_secs as f64 * 0.1)
+    } else {
+        UNKNOWN_DURATION_SEEK_SECS
+    }
+}
+
 pub fn get_thumbnail_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     let cache_dir = app
         .path()
@@ -18,7 +34,8 @@ pub fn get_thumbnail_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(thumb_dir)
 }
 
-pub fn generate_thumbnail(app: &AppHandle, video_path: &str) -> Option<String> {
+/// `duration_secs` is the probed duration (0 if unknown); it picks the frame.
+pub fn generate_thumbnail(app: &AppHandle, video_path: &str, duration_secs: i64) -> Option<String> {
     let thumb_dir = get_thumbnail_dir(app).ok()?;
 
     // Create a stable hash based on file path to avoid duplicates
@@ -36,11 +53,12 @@ pub fn generate_thumbnail(app: &AppHandle, video_path: &str) -> Option<String> {
     // final name (which the exists() check above would serve forever). Format, codec
     // and single-image mode are explicit because ffmpeg can't infer them from `.part`.
     let temp_path = thumb_dir.join(format!("{filename}.part"));
+    let seek = format!("{:.3}", thumbnail_seek(duration_secs));
     let output = run_with_timeout(
         Command::new("ffmpeg")
             .args([
                 "-ss",
-                "00:00:15",
+                seek.as_str(),
                 "-i",
                 video_path,
                 "-frames:v",
@@ -75,5 +93,22 @@ pub fn generate_thumbnail(app: &AppHandle, video_path: &str) -> Option<String> {
             let _ = fs::remove_file(&temp_path);
             None
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn seek_is_15s_or_a_tenth_of_short_clips() {
+        assert_eq!(thumbnail_seek(3600), 15.0);
+        assert_eq!(thumbnail_seek(150), 15.0);
+        assert_eq!(thumbnail_seek(100), 10.0);
+        assert_eq!(thumbnail_seek(5), 0.5);
+        assert_eq!(thumbnail_seek(1), 0.1);
+        // Unknown duration: a small offset, never past the end of a short clip
+        assert_eq!(thumbnail_seek(0), 1.0);
+        assert_eq!(thumbnail_seek(-1), 1.0);
     }
 }

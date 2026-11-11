@@ -1249,6 +1249,37 @@ pub fn get_media_paths(conn: &Connection) -> Result<Vec<(String, bool)>, String>
         .map_err(|e| format!("Failed to read media paths: {e}"))
 }
 
+/// What a scan knows about an indexed file before probing it again.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct KnownMedia {
+    /// Soft-deleted (trashed by the user).
+    pub deleted: bool,
+    /// Seconds; 0 when ffprobe never succeeded.
+    pub duration: i64,
+    pub thumbnail_path: Option<String>,
+}
+
+/// Every known path with its trash state, duration and thumbnail, for the scan.
+pub fn get_known_media(conn: &Connection) -> Result<Vec<(String, KnownMedia)>, String> {
+    let mut stmt = conn
+        .prepare("SELECT file_path, deleted_at IS NOT NULL, duration, thumbnail_path FROM media")
+        .map_err(|e| format!("Failed to prepare known media query: {e}"))?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                KnownMedia {
+                    deleted: row.get(1)?,
+                    duration: row.get(2)?,
+                    thumbnail_path: row.get(3)?,
+                },
+            ))
+        })
+        .map_err(|e| format!("Failed to query known media: {e}"))?;
+    rows.collect::<Result<Vec<_>, _>>()
+        .map_err(|e| format!("Failed to read known media: {e}"))
+}
+
 /// A group whose rows now parse to a shorter show name than its key (BUG-41).
 struct Rekey {
     group_id: i64,

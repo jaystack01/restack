@@ -80,7 +80,7 @@ _Nothing picked yet. Move items here when you start them._
   - **Solution:** Move them to `src/utils/format.js`.
 
 - [ ] **DES-7 · Low · Confirmed** — Magic numbers are spread across layers.
-  - **Location:** thumbnail seek `00:00:15` (`thumbnail.rs:31`), socket wait `15×200ms` (`player.rs:105-110`), `EPISODE_CLICK_DELAY_MS` (`SeriesDetail.jsx:22`), undo window `10000` (`SeriesDetail.jsx` `confirmDelete`), `MIN_SCAN_DISPLAY_MS` (`App.jsx:20`)
+  - **Location:** thumbnail seek cap 15 s / 10% (`thumbnail_seek` in `thumbnail.rs`), socket wait `15×200ms` (`player.rs:105-110`), `EPISODE_CLICK_DELAY_MS` (`SeriesDetail.jsx:22`), undo window `10000` (`SeriesDetail.jsx` `confirmDelete`), `MIN_SCAN_DISPLAY_MS` (`App.jsx:20`)
   - **Problem:** FEAT-1 (settings) will need several of these. Today they're unnamed literals. (The watched threshold is now `WATCHED_THRESHOLD` in `player.rs`.)
   - **Solution:** Use named `const`s at module top (Rust) or a `src/config.js`, and later the settings table.
 
@@ -98,11 +98,6 @@ _Nothing picked yet. Move items here when you start them._
 
 
 
-
-- [ ] **BUG-19 · Medium · Confirmed** — Thumbnails are never generated for clips shorter than 15 s, and never retried.
-  - **Location:** `src-tauri/src/utils/thumbnail.rs:30-31` (`-ss 00:00:15`), `commands/scanner.rs:65-71` (probe closure, only for `is_new`), `:97-100` (commit + `on_file` call)
-  - **Problem:** Evidence: in the local DB all 24 thumbnail-less rows have duration 1–8 s. A failed or timed-out ffprobe/ffmpeg (or a deleted thumbnails dir) is also permanent, because unchanged files are never re-probed.
-  - **Solution:** Seek to `min(15, duration * 0.1)` (duration is known first). Regenerate when `thumbnail_path IS NULL`, the file at `thumbnail_path` no longer exists, or `duration = 0`, not only for new files.
 
 - [ ] **BUG-21 · Low · Confirmed** — Skip-dir matches by name anywhere in the tree.
   - **Location:** `src-tauri/src/utils/scanner.rs:50`
@@ -185,6 +180,11 @@ _Nothing picked yet. Move items here when you start them._
   - **Problem:** If the mutex is ever poisoned (a panic while it is held), `.lock().ok()` yields `None`: the old mpv is not killed, and the new `Child` is dropped without being stored, so it keeps running untracked and is never reaped.
   - **Solution:** Use `lock().unwrap_or_else(|e| e.into_inner())` so the swap still happens on a poisoned lock.
 
+- [ ] **BUG-48 · Low · Improvement** — Sub-second clips are re-probed on every scan.
+  - **Location:** `src-tauri/src/utils/scanner.rs` (ffprobe duration parsing), `src-tauri/src/commands/scanner.rs` (`ProbeNeed::for_known`), `src-tauri/src/utils/thumbnail.rs` (`thumbnail_seek`)
+  - **Problem:** ffprobe's duration is truncated to whole seconds, so a clip shorter than 1 s is stored as duration 0. The thumbnail then seeks to 1 s (the unknown-duration fallback), gets no frame, and since BUG-19 both probes are retried on every scan.
+  - **Solution:** Parse the fractional duration (store at least 1, or keep sub-second precision for the seek), or record the probe failure so it isn't retried every scan (see DEP-8).
+
 ## 🔐 Security and Data Integrity
 
 
@@ -264,8 +264,8 @@ _Nothing picked yet. Move items here when you start them._
 
 - [ ] **DEP-8 · Low · Improvement** — Runtime tools aren't validated.
   - **Location:** `utils/scanner.rs:15`, `utils/thumbnail.rs:29`, `commands/player.rs:52`
-  - **Problem:** A missing `ffprobe`/`ffmpeg` silently yields duration 0 and no thumbnails forever (BUG-19). A missing `mpv` errors, but the UI swallows it.
-  - **Solution:** See FEAT-4. Also cache the result in `AppState` and skip probing when the tools are missing, so rows are retried once they're installed.
+  - **Problem:** A missing `ffprobe`/`ffmpeg` yields duration 0 and no thumbnail, retried every scan since BUG-19 (2026-11-11). A missing `mpv` errors, but the UI swallows it. Files whose probe always fails (or tools that are missing) are retried on every scan, and each retry forces a batch commit and can cost up to the 30 s / 60 s timeouts.
+  - **Solution:** See FEAT-4. Add a per-row failure count (additive column) or a per-scan retry cap, and skip probing when FEAT-4's `dependency_status` says the tool is missing, so rows are retried once it is installed.
 
 - [ ] **CHORE-6 · Low · Confirmed** — Fill in metadata and the window defaults.
   - **Location:** `src-tauri/Cargo.toml:4-5`, `tauri.conf.json:13-19`
@@ -360,6 +360,7 @@ _Current state (2026-11-11): `cargo test` runs 128 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **BUG-19**: thumbnail seek = min(15 s, 10% of duration), 1 s if unknown (`thumbnail_seek`); scans retry known files: ffprobe when duration = 0, ffmpeg when `thumbnail_path` is NULL or its file is gone (`ProbeNeed`, `db::get_known_media`). Complete files are never re-probed; failed retries keep existing values (CASE/COALESCE).
 - [x] 2026-11-11 **BUG-47**: read-then-write transactions (scan `UpsertBatch`, migrate/merge/move/reclassify/set_watched/sync_missing_media) begin IMMEDIATE via `db::begin_write`, so under WAL they wait for the write lock instead of failing with SQLITE_BUSY(_SNAPSHOT). Tested with two connections on a temp WAL DB.
 - [x] 2026-11-11 **BUG-23**: Undo timer lives in a ref, cleared before each new batch, on Undo and on unmount. Note: Undo still covers only the last batch (by design for now).
 - [x] 2026-11-11 **SEC-4**: mpv gets the file after a `--` separator, and `delete_episodes_cmd`/`restore_episodes_cmd` take media ids resolved by `db::resolve_trash_paths`: live rows only for delete (`deleted_at IS NULL AND missing_since IS NULL`), trashed rows only for restore, and the whole batch is rejected before any Trash move if an id is unknown or ineligible.

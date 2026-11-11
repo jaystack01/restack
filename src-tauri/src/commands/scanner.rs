@@ -1,6 +1,6 @@
 use crate::db::{
-    begin_write, get_full_library, get_media_paths, init_schema, open_db, sync_missing_media,
-    upsert_episode, upsert_movie, upsert_other,
+    begin_write, get_full_library, get_known_media, init_schema, open_db, sync_missing_media,
+    upsert_episode, upsert_movie, upsert_other, KnownMedia,
 };
 use crate::models::{AppState, LibraryResponse, ScanGuard};
 use crate::run_blocking;
@@ -49,7 +49,7 @@ fn scan_roots_and_sync(app: &AppHandle, roots: &[String]) -> Result<LibraryRespo
     let _ = app.emit("scan:start", ScanStartPayload { total_files });
 
     // ── Pass 2: Process each file and emit per-file progress ─────────────────
-    sync_library(&conn, &walk, |index, file_path, is_new| {
+    sync_library(&conn, &walk, |index, file_path, need| {
         // Emit progress (1-based so "1 / N" shows on the first file)
         let file_name = Path::new(file_path)
             .file_name()
@@ -65,20 +65,21 @@ fn scan_roots_and_sync(app: &AppHandle, roots: &[String]) -> Result<LibraryRespo
             },
         );
 
-        // Only run ffmpeg / duration for new files (expensive). Both are time-limited;
-        // a failure or timeout just leaves duration 0 / no thumbnail for this file.
-        if is_new {
-            let duration = get_duration(file_path).unwrap_or_else(|e| {
+        // ffprobe / ffmpeg only for what the row lacks (both expensive and time-limited);
+        // a failure or timeout just leaves duration 0 / no thumbnail until the next scan.
+        let duration = if need.duration {
+            get_duration(file_path).unwrap_or_else(|e| {
                 eprintln!("No duration for {file_path}: {e}");
                 0
-            });
-            (
-                duration,
-                crate::utils::thumbnail::generate_thumbnail(app, file_path),
-            )
+            })
         } else {
-            (0, None)
-        }
+            need.known_duration
+        };
+        let thumb = need
+            .thumbnail
+            .then(|| crate::utils::thumbnail::generate_thumbnail(app, file_path, duration))
+            .flatten();
+        (duration, thumb)
     })?;
 
     println!("Scan completed in {:?}", start.elapsed());
@@ -86,15 +87,58 @@ fn scan_roots_and_sync(app: &AppHandle, roots: &[String]) -> Result<LibraryRespo
     get_full_library(&conn)
 }
 
+/// What a scan still has to probe for one file. New files need everything; known files
+/// are retried only for what is missing (BUG-19), so a file with a duration and a
+/// thumbnail on disk is never probed again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ProbeNeed {
+    /// Run ffprobe: the file is new, or its row has duration 0.
+    duration: bool,
+    /// Run ffmpeg: the row has no thumbnail, or its file is gone (e.g. a cleared cache).
+    thumbnail: bool,
+    /// The row's duration, which picks the thumbnail frame when ffprobe isn't rerun.
+    known_duration: i64,
+}
+
+impl ProbeNeed {
+    const NEW: ProbeNeed = ProbeNeed {
+        duration: true,
+        thumbnail: true,
+        known_duration: 0,
+    };
+
+    fn for_known(row: &KnownMedia) -> Self {
+        let thumbnail_ok = row
+            .thumbnail_path
+            .as_deref()
+            .is_some_and(|p| Path::new(p).exists());
+        ProbeNeed {
+            duration: row.duration <= 0,
+            thumbnail: !thumbnail_ok,
+            known_duration: row.duration.max(0),
+        }
+    }
+
+    fn any(&self) -> bool {
+        self.duration || self.thumbnail
+    }
+}
+
 /// Upsert every walked file, then remove or hide rows whose files weren't seen.
-/// `on_file(index, path, is_new)` returns `(duration, thumbnail)` for the upsert.
+/// `on_file(index, path, need)` probes what `need` asks for and returns
+/// `(duration, thumbnail)` for the upsert; the upsert never lets a failed probe
+/// (0 / `None`) clear values the row already has.
 fn sync_library(
     conn: &Connection,
     walk: &ScanWalk,
-    mut on_file: impl FnMut(usize, &str, bool) -> (i64, Option<String>),
+    mut on_file: impl FnMut(usize, &str, ProbeNeed) -> (i64, Option<String>),
 ) -> Result<(), String> {
-    // Load existing files from DB (path → soft-deleted?)
-    let existing_files: HashMap<String, bool> = get_media_paths(conn)?.into_iter().collect();
+    let known: HashMap<String, KnownMedia> = get_known_media(conn)?.into_iter().collect();
+    // path → soft-deleted?, for reconciliation
+    let existing_files: HashMap<String, bool> = known
+        .iter()
+        .map(|(path, row)| (path.clone(), row.deleted))
+        .collect();
     let mut seen_files: HashSet<String> = HashSet::new();
     let mut batch = UpsertBatch::new(conn);
     let mut skipped = 0usize;
@@ -102,14 +146,16 @@ fn sync_library(
 
     for (index, file_path) in walk.files.iter().enumerate() {
         seen_files.insert(file_path.clone());
-        let is_new = !existing_files.contains_key(file_path);
+        let need = known
+            .get(file_path)
+            .map_or(ProbeNeed::NEW, ProbeNeed::for_known);
 
-        // New files run ffprobe + ffmpeg (seconds each): never hold the write lock
+        // Probes run ffprobe / ffmpeg (seconds each): never hold the write lock
         // across that, or the mpv tracker's progress writes hit SQLITE_BUSY.
-        if is_new {
+        if need.any() {
             batch.commit()?;
         }
-        let (duration, thumb) = on_file(index, file_path, is_new);
+        let (duration, thumb) = on_file(index, file_path, need);
 
         let Some(stem) = Path::new(file_path).file_stem().and_then(|s| s.to_str()) else {
             continue;
@@ -287,14 +333,16 @@ mod tests {
         conn
     }
 
-    /// Run a scan of `roots` with a fake probe; returns the files that were probed.
+    /// Run a scan of `roots` with a fake probe that always succeeds; returns the files
+    /// that were probed. The fake thumbnail is the video file itself, so it exists on disk
+    /// (and later scans don't retry it) without adding files to the scanned folders.
     fn scan(conn: &Connection, roots: &[String]) -> Vec<String> {
         let walk = collect_video_files(roots);
         let mut probed = Vec::new();
-        sync_library(conn, &walk, |_, path, is_new| {
-            if is_new {
+        sync_library(conn, &walk, |_, path, need| {
+            if need.any() {
                 probed.push(path.to_string());
-                (1200, Some(format!("{path}.jpg")))
+                (1200, Some(path.to_string()))
             } else {
                 (0, None)
             }
@@ -328,6 +376,119 @@ mod tests {
             .collect();
         paths.sort();
         paths
+    }
+
+    fn duration_and_thumb(conn: &Connection, path: &str) -> (i64, Option<String>) {
+        conn.query_row(
+            "SELECT duration, thumbnail_path FROM media WHERE file_path = ?1",
+            [path],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    /// Scan `root` with `probe` standing in for ffprobe + ffmpeg; returns each probed
+    /// file with what it needed.
+    fn scan_with(
+        conn: &Connection,
+        root: &str,
+        mut probe: impl FnMut(&str, ProbeNeed) -> (i64, Option<String>),
+    ) -> Vec<(String, ProbeNeed)> {
+        let walk = collect_video_files(&[root.to_string()]);
+        let mut probed = Vec::new();
+        sync_library(conn, &walk, |_, path, need| {
+            if !need.any() {
+                return (0, None);
+            }
+            probed.push((path.to_string(), need));
+            probe(path, need)
+        })
+        .unwrap();
+        probed
+    }
+
+    #[test]
+    fn short_clip_gets_a_thumbnail() {
+        let tmp = TempDir::new("sync-short");
+        let thumbs = TempDir::new("sync-short-thumbs");
+        let clip = tmp.file("Clip.mkv");
+        let conn = test_db();
+
+        // Fake ffmpeg: like the real one, it only yields a frame if the seek is inside
+        // the clip. The seek comes from the duration probed first.
+        let probed = scan_with(&conn, &tmp.path(""), |_, need| {
+            assert_eq!(need, ProbeNeed::NEW);
+            let duration = 5;
+            let seek = crate::utils::thumbnail::thumbnail_seek(duration);
+            let thumb = (seek < duration as f64).then(|| thumbs.file("clip.jpg"));
+            (duration, thumb)
+        });
+
+        assert_eq!(probed.len(), 1);
+        assert_eq!(
+            duration_and_thumb(&conn, &clip),
+            (5, Some(thumbs.path("clip.jpg")))
+        );
+    }
+
+    #[test]
+    fn known_row_without_thumbnail_is_retried() {
+        let tmp = TempDir::new("sync-retry-thumb");
+        let thumbs = TempDir::new("sync-retry-thumb-thumbs");
+        let ep = tmp.file("Show.S01E01.mkv");
+        let conn = test_db();
+
+        // First scan: ffprobe works, ffmpeg fails
+        scan_with(&conn, &tmp.path(""), |_, _| (600, None));
+        assert_eq!(duration_and_thumb(&conn, &ep), (600, None));
+
+        // Next scan retries only the thumbnail, framed by the stored duration
+        let thumb = thumbs.file("ep.jpg");
+        let probed = scan_with(&conn, &tmp.path(""), |_, need| {
+            (need.known_duration, Some(thumb.clone()))
+        });
+        let expected = ProbeNeed {
+            duration: false,
+            thumbnail: true,
+            known_duration: 600,
+        };
+        assert_eq!(probed, vec![(ep.clone(), expected)]);
+        assert_eq!(duration_and_thumb(&conn, &ep), (600, Some(thumb.clone())));
+
+        // Now complete: not probed again
+        assert!(scan_with(&conn, &tmp.path(""), |_, _| unreachable!()).is_empty());
+
+        // The thumbnail cache was cleared: retried, and a failed retry keeps the old values
+        fs::remove_file(&thumb).unwrap();
+        let probed = scan_with(&conn, &tmp.path(""), |_, need| (need.known_duration, None));
+        assert_eq!(probed, vec![(ep.clone(), expected)]);
+        assert_eq!(duration_and_thumb(&conn, &ep), (600, Some(thumb)));
+    }
+
+    #[test]
+    fn known_row_without_duration_is_reprobed() {
+        let tmp = TempDir::new("sync-retry-duration");
+        let thumbs = TempDir::new("sync-retry-duration-thumbs");
+        let ep = tmp.file("Show.S01E01.mkv");
+        let thumb = thumbs.file("ep.jpg");
+        let conn = test_db();
+
+        // ffprobe failed (or timed out) on the first scan; ffmpeg still made a thumbnail
+        scan_with(&conn, &tmp.path(""), |_, _| (0, Some(thumb.clone())));
+
+        // A failed retry changes nothing; a working one stores the duration
+        let probed = scan_with(&conn, &tmp.path(""), |_, _| (0, None));
+        let expected = ProbeNeed {
+            duration: true,
+            thumbnail: false,
+            known_duration: 0,
+        };
+        assert_eq!(probed, vec![(ep.clone(), expected)]);
+        assert_eq!(duration_and_thumb(&conn, &ep), (0, Some(thumb.clone())));
+
+        scan_with(&conn, &tmp.path(""), |_, _| (1300, None));
+        assert_eq!(duration_and_thumb(&conn, &ep), (1300, Some(thumb)));
+        assert!(scan_with(&conn, &tmp.path(""), |_, _| unreachable!()).is_empty());
     }
 
     #[test]
@@ -501,8 +662,8 @@ mod tests {
         player.busy_timeout(Duration::ZERO).unwrap();
         let walk = collect_video_files(&[tmp.path("Show"), tmp.path("Other")]);
         let mut probes = 0;
-        sync_library(&conn, &walk, |_, _, is_new| {
-            if !is_new {
+        sync_library(&conn, &walk, |_, _, need| {
+            if !need.any() {
                 return (0, None);
             }
             probes += 1;
