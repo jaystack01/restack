@@ -7,6 +7,7 @@ use crate::run_blocking;
 use rusqlite::Connection;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -108,6 +109,23 @@ pub async fn play_episode(
     run_blocking(move || start_playback(app, file_path, start_seconds)).await
 }
 
+/// Directory for mpv's IPC socket: `$XDG_RUNTIME_DIR` (per-user, mode 0700) when
+/// it is an absolute path to an existing directory, else `/tmp`. `runtime_dir`
+/// is the env value, passed in so tests don't depend on the environment.
+fn mpv_socket_dir(runtime_dir: Option<&str>) -> PathBuf {
+    match runtime_dir.map(Path::new) {
+        Some(dir) if dir.is_absolute() && dir.is_dir() => dir.to_path_buf(),
+        _ => PathBuf::from("/tmp"),
+    }
+}
+
+fn mpv_socket_path(runtime_dir: Option<&str>, id: uuid::Uuid) -> String {
+    mpv_socket_dir(runtime_dir)
+        .join(format!("mpv-{id}.sock"))
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// mpv's arguments: every option first, then `--`, then the file, so a path
 /// starting with `-` can never be parsed as an option.
 fn mpv_args(file_path: &str, socket_path: &str, start: u64) -> Vec<String> {
@@ -148,8 +166,11 @@ fn start_playback(
         get_playback_state(&conn, &file_path)?.unwrap_or((0, 0, false));
     let start = start_seconds.unwrap_or_else(|| resume_position(last_position, duration));
 
-    // 🧠 unique socket per playback
-    let socket_path = format!("/tmp/mpv-{}.sock", uuid::Uuid::new_v4());
+    // 🧠 unique socket per playback, in the per-user runtime dir when there is one
+    let socket_path = mpv_socket_path(
+        std::env::var("XDG_RUNTIME_DIR").ok().as_deref(),
+        uuid::Uuid::new_v4(),
+    );
 
     let mut cmd = Command::new("mpv");
     cmd.args(mpv_args(&file_path, &socket_path, start));
@@ -522,6 +543,38 @@ mod tests {
                 .count(),
             1,
             "the path appears only as the positional file argument"
+        );
+    }
+
+    #[test]
+    fn socket_goes_in_an_existing_runtime_dir() {
+        // The crate dir always exists; nothing is created on disk
+        let dir = env!("CARGO_MANIFEST_DIR");
+        assert_eq!(mpv_socket_dir(Some(dir)), PathBuf::from(dir));
+
+        let id = uuid::Uuid::nil();
+        assert_eq!(
+            mpv_socket_path(Some(dir), id),
+            format!("{dir}/mpv-{id}.sock")
+        );
+    }
+
+    #[test]
+    fn socket_falls_back_to_tmp() {
+        let tmp = PathBuf::from("/tmp");
+        assert_eq!(mpv_socket_dir(None), tmp, "unset");
+        assert_eq!(mpv_socket_dir(Some("")), tmp, "empty");
+        assert_eq!(
+            mpv_socket_dir(Some("/nonexistent/restack-runtime-dir")),
+            tmp,
+            "missing dir"
+        );
+        assert_eq!(mpv_socket_dir(Some("relative/dir")), tmp, "relative");
+        let file = concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml");
+        assert_eq!(mpv_socket_dir(Some(file)), tmp, "not a directory");
+        assert_eq!(
+            mpv_socket_path(None, uuid::Uuid::nil()),
+            format!("/tmp/mpv-{}.sock", uuid::Uuid::nil())
         );
     }
 

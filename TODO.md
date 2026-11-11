@@ -204,11 +204,6 @@ _Nothing picked yet. Move items here when you start them._
   - **Done 2026-11-11 (mpv half):** `play_episode` builds its arguments with the pure `mpv_args`, which puts the file last after a `--` separator, so a path can never be parsed as an mpv option.
   - **Solution (remaining):** Have delete/restore accept `media_ids`, resolve paths from the DB, and refuse anything not in `media`.
 
-- [ ] **SEC-5 · Low · Confirmed** — The mpv IPC socket is in world-readable `/tmp`.
-  - **Location:** `src-tauri/src/commands/player.rs:111`
-  - **Problem:** Other local users can see the socket name. mpv creates it with the default umask, so they could connect and send commands to mpv (which can run `run` subprocess commands).
-  - **Solution:** Use `$XDG_RUNTIME_DIR` (per-user, mode 0700), falling back to `/tmp`.
-
 - [ ] **SEC-8 · Low · Potential** — Non-UTF-8 paths are stored lossily.
   - **Location:** `src-tauri/src/utils/scanner.rs` (`collect_video_files`, where stored paths are built), `commands/scanner.rs:52-54` (progress file name, `to_string_lossy`)
   - **Problem:** A filename with invalid UTF-8 is stored with U+FFFD. mpv, trash, and restore then target a path that doesn't exist.
@@ -383,6 +378,7 @@ _Current state (2026-11-05): `cargo test` runs 104 backend tests (`db.rs`, `util
 
 ## ✅ Done
 
+- [x] 2026-11-11 **SEC-5**: the mpv IPC socket is created in `$XDG_RUNTIME_DIR` (per-user, mode 0700) when it is an absolute existing dir, falling back to `/tmp` (`mpv_socket_dir`, tested).
 - [x] 2026-11-11 **BUG-20**: Walk skips hidden dirs below a root (a hidden root is still walked); `/run/media/<user>` added to default roots; user name from `$USER`/`$LOGNAME` before the `$HOME` basename. Skipped non-trash subtrees (`ScanWalk.skipped_dirs`) are excluded from reconciliation, so rows indexed there earlier are left untouched. Follow-ups: BUG-44, BUG-45.
 - [x] 2026-11-11 **SEC-7, DEP-2**: removed the unused dialog and opener plugins: their Rust crates and `.plugin(...)` calls in `lib.rs`, the `@tauri-apps/plugin-dialog`/`plugin-opener` npm packages, and the `opener:default`/`dialog:default` capability permissions; both lockfiles updated. FEAT-1 re-adds the dialog with a narrow permission.
 - [x] 2026-11-11 **SEC-6**: Asset-protocol scope is `$APPDATA/thumbnails/**`, which Tauri resolves through `app_data_dir()` like `utils/thumbnail.rs`, so thumbnails work under a custom `$XDG_DATA_HOME` and the identifier is no longer duplicated.

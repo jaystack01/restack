@@ -108,7 +108,7 @@ React (src/)  ──invoke()──▶  #[tauri::command] (src-tauri/src/commands
                                     │                         │
                               restack.db (SQLite)       walkdir / ffprobe / ffmpeg
                                                               
-player.rs ── spawns mpv with --input-ipc-server=/tmp/mpv-<uuid>.sock
+player.rs ── spawns mpv with --input-ipc-server=$XDG_RUNTIME_DIR/mpv-<uuid>.sock (or /tmp)
           └─ background thread reads IPC → writes progress to DB → emits events
 ```
 
@@ -233,7 +233,7 @@ When adding a pattern, insert it at the right priority and think about false pos
 ### Playback (`commands/player.rs`)
 
 - `play_episode(filePath, startSeconds?)`: start = `startSeconds ??` the DB `last_position`, except that a position in the last 10% (credits) restarts from 0 (`resume_position`). Kills any previous mpv child, spawns
-  `mpv --input-ipc-server=/tmp/mpv-<uuid>.sock --keep-open=no --no-resume-playback --script-opts=autoload-disabled=yes --force-window=no [--start=N] -- <file>`, built by the pure `mpv_args`. The file always comes last, after `--`, so a path can never be parsed as an mpv option.
+  `mpv --input-ipc-server=<sock> --keep-open=no --no-resume-playback --script-opts=autoload-disabled=yes --force-window=no [--start=N] -- <file>`, built by the pure `mpv_args`. The file always comes last, after `--`, so a path can never be parsed as an mpv option. `<sock>` is `$XDG_RUNTIME_DIR/mpv-<uuid>.sock` when `$XDG_RUNTIME_DIR` is an absolute path to an existing dir (per-user, mode 0700), else `/tmp/mpv-<uuid>.sock` (`mpv_socket_dir`).
 - A thread observes `time-pos`, `duration` and `pause` over IPC on one DB connection per playback. It writes and emits progress at most every 5 s of position or wall time (`should_persist`), right away when watched flips, and on pause and when the loop exits for any reason. **Watched latches** at ≥ 90% (`WATCHED_THRESHOLD`): an already-watched item stays watched while rewatching (`is_watched`). Watched also latches within a session, so seeking back below 90% does not un-mark it. On `eof` the position resets to 0 (watched = true).
 - Structure: `parse_ipc_line` turns an mpv JSON line into an `IpcEvent`. `ProgressTracker` (pure, time is passed in) owns the position/watched/throttle state and returns what to persist and when to exit. `drive_ipc` is the loop (read, parse, handle, persist, break on exit or read error, final flush) and is shared by `track_progress` and the tests. `track_progress` only does the I/O: socket setup, DB writes, events.
 - On `end-file` with reason `eof`, `TrackerExit::play_next` is set. Only after `drive_ipc` returns does `track_progress` look up the next episode in the group, remove the socket, emit `video_playback_stopped`, and then emit `play_next_episode`. That ordering avoids a Broken-pipe race, so don't move it.
@@ -327,7 +327,7 @@ Check these before you assume a behaviour is intended. This list only covers sha
 5. Unchanged files get `duration = 0` / `thumb = None` on rescan. The upserts handle this via `CASE`/`COALESCE`, so preserve that logic if you edit upserts.
 6. Many `invoke` calls swallow errors (`catch {}`). The App-level scan is intentionally silent.
 7. `index.css` imports Google Fonts. That conflicts with offline-first, and the CSP (`default-src 'self'`) likely blocks it in the webview, so the system font fallback is what renders.
-8. mpv sockets live in `/tmp/mpv-<uuid>.sock` and are cleaned up when the tracker ends.
+8. mpv sockets live in `$XDG_RUNTIME_DIR/mpv-<uuid>.sock` (fallback `/tmp/mpv-<uuid>.sock`, see `mpv_socket_dir`) and are cleaned up when the tracker ends.
 
 ---
 
